@@ -76,6 +76,77 @@ beatable.
 
 ---
 
+## Windowed TrailMix reconciliation
+
+The challenge circuit is a classically selected mixed-add primitive: the
+benchmark gives the circuit one already-selected offset point. Shor-style
+windowed scalar multiplication needs a coherent selector instead:
+
+```text
+|i>|R> -> |i>|R + P_i>
+```
+
+where `i` is a quantum window address, `R = (x_R, y_R)` is the quantum
+accumulator, and `P_i` comes from a classical precomputed window table. The
+table is circuit ROM data, not an input register, and it is not counted as
+ancilla. Only the address, accumulator, selected-coordinate scratch, arithmetic
+scratch, and other live quantum work registers count.
+
+The reconciliation wrapper is implemented in
+`src/point_add/trailmix_ludicrous/windowed.rs`, with a sidecar validator in
+`src/bin/eval_windowed_trailmix.rs`. It keeps the TrailMix arithmetic core but
+wraps each classical point access in Andre/Qarton-style lookup and unlookup:
+
+1. compute `c = (i != 0)`;
+2. lookup the selected coordinate into temporary scratch;
+3. use that scratch in the TrailMix arithmetic;
+4. immediately unlookup it back to zero;
+5. repeat for the three logical lookup sites: first `P_i`, then `3*x(P_i)`,
+   then `P_i` again for the final coordinate update;
+6. uncompute `c`.
+
+The lookup backend follows Qarton:
+
+- for `len(window) == 2`, the wrapper uses controlled constant XOR. This is the
+  real benchmark path for `P_0 = O, P_1 = G`, and it avoids counting a generic
+  QROM walk;
+- for `len(window) > 2`, it uses generic address-matched table lookup/unlookup
+  machinery for compatibility tests such as `O, G, 2G, 3G`.
+
+The wrapper deliberately loads one coordinate at a time instead of holding a
+full temporary point `(x_i, y_i)`. If both coordinates are live during the
+coordinate-subtract phase, the peak becomes:
+
+```text
+public address i                  1
+public accumulator x_R, y_R      512
+branch bit c = (i != 0)            1
+lookup scratch x_i, y_i          512
+mod-sub carry ancilla              1
+zero pad inside vented add         1
+vented carry ancillae            256
+total                           1284
+```
+
+Looking up `x_i`, using it, unlooking it, then doing the same for `y_i`
+preserves the lookup/use/unlookup protocol while removing that 512-qubit
+full-point scratch peak. The current benchmark-mode wrapper reports
+`Q_core = 1168`; for a full Shor `w = 16` estimate, add the address and lookup
+overhead analytically rather than instantiating a `2^16` quantum table.
+
+To test the reconciliation wrapper:
+
+```bash
+cargo check --bin eval_windowed_trailmix
+cargo run --release --bin eval_windowed_trailmix -- --k 1 --targets 1
+cargo run --release --bin eval_windowed_trailmix -- --k 2 --targets 1
+```
+
+The `k = 1` run checks the controlled-constant-XOR benchmark path. The `k = 2`
+run checks the generic multi-entry lookup path.
+
+---
+
 ## How to play
 
 Using the ECDSA Fail CLI:

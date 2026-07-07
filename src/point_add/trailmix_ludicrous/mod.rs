@@ -21,6 +21,7 @@ mod gidney;
 mod mcx;
 pub mod schedule;
 mod square;
+pub mod windowed;
 
 pub use schedule::PAD;
 
