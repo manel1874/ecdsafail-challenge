@@ -1123,9 +1123,10 @@ fn add_vented_chunked_opt_capped(
     // erases; an early GCD subtract (large headroom) is fully plain (zero erases).
     let c = chunk.clamp(1, n); // low-region block width
     let live = circ.active_qubits as usize;
+    let headroom = super::target_qubit_headroom(circ).unwrap_or_else(|| CEILING.saturating_sub(live));
     // vent budget (held-carry cap); capped at `max_vents` (e.g. ROW_ADD_VENTS for the
     // square row-adds).
-    let k = CEILING.saturating_sub(live).clamp(1, n).min(max_vents);
+    let k = headroom.clamp(1, n).min(max_vents);
     let plain_len = if k >= n {
         n
     } else if c <= 1 {

@@ -88,7 +88,7 @@ pub fn build_windowed_trailmix_ops_for_window(
         "the reference QROM is intended for compatibility tests; use k <= 6"
     );
 
-    super::install_q1153_submission_defaults();
+    install_windowed_reconciliation_defaults();
     let mut circ = B::new();
     load_schedule();
 
@@ -105,6 +105,24 @@ pub fn build_windowed_trailmix_ops_for_window(
 
     for (a, b) in route_swaps(&x2, &x2_init) {
         circ.swap(a, b);
+    }
+
+    // Challenge-style grinding tail: 48 X;X identity pairs. This does not
+    // change the circuit action or Toffoli count, but it changes the emitted op
+    // stream and therefore the Fiat-Shamir-derived validation population.
+    if let Some(nonce) = std::env::var("DIALOG_TAIL_NONCE")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        for i in 0..48u32 {
+            let q = if (nonce >> i) & 1 == 1 {
+                x2_init[1]
+            } else {
+                x2_init[0]
+            };
+            circ.x(q);
+            circ.x(q);
+        }
     }
 
     let ops = std::mem::take(&mut circ.ops);
@@ -129,6 +147,21 @@ pub fn build_windowed_trailmix_ops_for_window(
             },
         },
     )
+}
+
+fn install_windowed_reconciliation_defaults() {
+    super::install_q1153_submission_defaults();
+    // The windowed ABI carries a live quantum address/control through phases
+    // tuned for the challenge ABI's classical selected point. These defaults
+    // reduce that extra peak pressure while improving the Q*T product.
+    for (name, value) in [
+        ("TLM_FOLD_RELEASE_CONTROLS", "1"),
+        ("TLM_TARGET_FFG_RESERVE", "7"),
+    ] {
+        if std::env::var_os(name).is_none() {
+            std::env::set_var(name, value);
+        }
+    }
 }
 
 pub fn secp256k1_window_points(entries: usize) -> Vec<(U256, U256)> {
@@ -169,6 +202,8 @@ fn ec_add_window(
 
     // Andre Algorithm 1 branch bit: the zero window entry is the point at
     // infinity, and the square/final-negation parts are skipped for that branch.
+    // Keep `c = (i != 0)` as an explicit scratch qubit, matching the 1156-qubit
+    // reconciliation case and the lookup/use/unlookup structure in the paper.
     circ.set_phase("tlm_w_nonzero_address");
     let c = circ.alloc_qubit();
     toggle_nonzero_address(circ, address, &c);
