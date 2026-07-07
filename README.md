@@ -130,20 +130,52 @@ total                           1284
 
 Looking up `x_i`, using it, unlooking it, then doing the same for `y_i`
 preserves the lookup/use/unlookup protocol while removing that 512-qubit
-full-point scratch peak. The current benchmark-mode wrapper reports
-`Q_core = 1168`; for a full Shor `w = 16` estimate, add the address and lookup
-overhead analytically rather than instantiating a `2^16` quantum table.
+full-point scratch peak. The committed benchmark-mode reconciliation case keeps
+Andre's explicit scratch bit `c = (i != 0)` and reports `Q_core = 1156`.
+For a full Shor `w = 16` estimate, add the address and lookup overhead
+analytically rather than instantiating a `2^16` quantum table.
 
 To test the reconciliation wrapper:
 
 ```bash
 cargo check --bin eval_windowed_trailmix
-cargo run --release --bin eval_windowed_trailmix -- --k 1 --targets 1
-cargo run --release --bin eval_windowed_trailmix -- --k 2 --targets 1
+cargo run --release --bin eval_windowed_trailmix -- --k 1 --targets 1 --nonce 0
+cargo run --release --bin eval_windowed_trailmix -- --k 2 --targets 1 --nonce 0
 ```
 
 The `k = 1` run checks the controlled-constant-XOR benchmark path. The `k = 2`
 run checks the generic multi-entry lookup path.
+
+For challenge-style randomized validation, use:
+
+```bash
+cargo run --release --bin eval_windowed_trailmix -- --k 1 --challenge-style --nonce 0
+```
+
+`--challenge-style` defaults to 9024 Fiat-Shamir-derived shots. The two-entry
+benchmark mode excludes address zero by default, matching the challenge's
+infinity-offset skip. To also stress the no-op `P_0 = O` branch, add
+`--include-zero-address`.
+
+The evaluator also supports a local nonce sweep:
+
+```bash
+cargo run --release --bin eval_windowed_trailmix -- --k 1 --hunt-nonces 16 --hunt-shots 9024 --hunt-start 0
+```
+
+Useful nonce flags:
+
+- `--nonce N` sets `DIALOG_TAIL_NONCE=N` for one run.
+- `--hunt-nonces N` tests `N` consecutive tail nonces.
+- `--hunt-start N` chooses the first nonce in the sweep.
+- `--hunt-shots N` sets the number of shots per nonce; it must be a multiple of
+  64.
+- `--hunt-stop-on-clean` stops at the first `0/0/0` result.
+
+The nonce is implemented as the same challenge-style identity tail: 48 `X;X`
+pairs selected by `DIALOG_TAIL_NONCE`. This does not change the logical action
+or Toffoli count, but it changes the emitted op stream and therefore the
+Fiat-Shamir-derived validation population.
 
 ---
 
