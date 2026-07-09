@@ -79,8 +79,12 @@ pub(crate) use arith::*;
 mod rounds;
 pub(crate) use rounds::*;
 
-pub mod trailmix_ludicrous;
+mod bilinear_toffoli;
+pub mod island_search;
+mod mbu_clean_and;
 mod single_ccx_fanout;
+mod support_rewrites;
+pub mod trailmix_ludicrous;
 
 thread_local! {
     static D1_PHASE_CORRECTED_PRODUCT_CORE_SCOPE: std::cell::Cell<bool> =
@@ -209,7 +213,6 @@ pub struct PhaseResource {
     pub hmr_ops: usize,
     pub r_ops: usize,
 }
-
 
 impl B {
     fn new() -> Self {
@@ -683,7 +686,6 @@ pub const SECP256K1_P: U256 = U256::from_limbs([
     0xFFFFFFFFFFFFFFFF,
 ]);
 
-
 pub const ONE_INV_DX3_AFFINE_PA_ENV: &str = "ONE_INV_DX3_AFFINE_PA";
 pub const ONE_INV_DX3_AFFINE_PA_BLOCKER: &str =
     "ONE_INV_DX3_AFFINE_PA_BLOCKED: the dx^3 algebra gives Rx and Ry with \
@@ -695,7 +697,6 @@ pub const ONE_INV_DX3_AFFINE_PA_BLOCKER: &str =
      emit a clean one-inversion four-register PA.";
 
 // ─── helpers: bit access on U256 ────────────────────────────────────────────
-
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Cuccaro ripple-carry adder
@@ -729,7 +730,6 @@ pub const ONE_INV_DX3_AFFINE_PA_BLOCKER: &str =
 // qubit register, load the classical value into it, run Cuccaro, then
 // unload. The load/unload is not counted against Toffolis.
 
-
 fn direct_const_walks_enabled() -> bool {
     std::env::var("KAL_DIRECT_CONST_WALKS").ok().as_deref() == Some("1")
 }
@@ -754,12 +754,10 @@ fn kal_vent_halve_enabled() -> bool {
     std::env::var("KAL_VENT_HALVE").ok().as_deref() == Some("1")
 }
 
-
 const ALT_SEED_COUNT: usize = 5;
 const ALT_SEED_COMMIT: usize = 24;
 const ALT_SEED_SHOTS: usize = 4096;
 const ALT_SEED_CLASSICAL_LIMIT: usize = 2;
-
 
 fn secp256k1_curve() -> WeierstrassEllipticCurve {
     WeierstrassEllipticCurve {
@@ -1148,6 +1146,41 @@ fn set_default_env(name: &str, value: &str) {
     }
 }
 
+fn apply_dead_ccx_drop(mut ops: Vec<Op>) -> Vec<Op> {
+    let Ok(idx_path) = std::env::var("DROP_DEAD_IDX_FILE") else {
+        return ops;
+    };
+    let drop_txt = std::fs::read_to_string(&idx_path)
+        .unwrap_or_else(|err| panic!("failed to read DROP_DEAD_IDX_FILE={idx_path}: {err}"));
+    let mut drop = std::collections::HashSet::new();
+    for line in drop_txt.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with("idx") {
+            continue;
+        }
+        if let Ok(v) = t.split('\t').next().unwrap_or(t).parse::<usize>() {
+            drop.insert(v);
+        }
+    }
+    if drop.is_empty() {
+        return ops;
+    }
+    let before = ops.len();
+    ops = ops
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !drop.contains(i))
+        .map(|(_, op)| op)
+        .collect();
+    eprintln!(
+        "DROP_DEAD_CCX: removed {} ops ({} -> {})",
+        before - ops.len(),
+        before,
+        ops.len()
+    );
+    ops
+}
+
 // Q1153 second-512 scan route. To submit a clean hit from the current hunt,
 // update this nonce, build with no shell env overrides, run `ecdsafail run`,
 // and submit only if it remains 0 / 0 / 0.
@@ -1205,10 +1238,7 @@ fn configure_ecdsafail_submission_route() {
         "DIALOG_GCD_COMPARE_STEP_BITS",
         "181:48,194:48,199:48,202:48,207:48,212:48,216:48",
     );
-    set_default_env(
-        "DIALOG_GCD_FOLD_CARRY_TRUNC_STEP_WINDOWS",
-        "",
-    );
+    set_default_env("DIALOG_GCD_FOLD_CARRY_TRUNC_STEP_WINDOWS", "");
     set_default_env("DIALOG_GCD_FOLD_CARRY_TRUNC_W", "17");
     set_default_env("DIALOG_GCD_FOLD_FREED_TAIL", "1");
     set_default_env("DIALOG_GCD_FOLD_FREED_TAIL_ED", "1");
@@ -1232,10 +1262,7 @@ fn configure_ecdsafail_submission_route() {
     set_default_env("DIALOG_GCD_K5_HEAD11_STREAM_PAIR_APPLY", "1");
     set_default_env("DIALOG_GCD_K5_HEAD11_SPLIT_PAIR_SHIFT_APPLY", "1");
     set_default_env("DIALOG_GCD_K5_HEAD11_PAIR01_S2_PERMUTE_APPLY", "1");
-    set_default_env(
-        "DIALOG_GCD_K5_HEAD11_PAIR23_S2_BORROW_PAIR01_APPLY",
-        "1",
-    );
+    set_default_env("DIALOG_GCD_K5_HEAD11_PAIR23_S2_BORROW_PAIR01_APPLY", "1");
     set_default_env("DIALOG_GCD_K5_PARTIAL_RAW_RELEASE", "8");
     set_default_env("DIALOG_GCD_K5_RELEASE_SCALE_BITS", "5");
     set_default_env("DIALOG_GCD_K5_STREAM_PAIR_APPLY", "1");
@@ -1259,10 +1286,7 @@ fn configure_ecdsafail_submission_route() {
         "10:19,11:19,21:20,63:19,74:19,100:19,107:19,110:19,118:19,135:19,136:19,137:19,188:20,204:19,227:20,241:19",
     );
     set_default_env("DIALOG_GCD_SPECIAL_FOLD_PARK_LOW_CARRIES", "16");
-    set_default_env(
-        "DIALOG_GCD_SPECIAL_FOLD_PARK_LOW_CARRIES_STEP_MAP",
-        "",
-    );
+    set_default_env("DIALOG_GCD_SPECIAL_FOLD_PARK_LOW_CARRIES_STEP_MAP", "");
     set_default_env("DIALOG_GCD_SPECIAL_FOLD_RELEASE_SCRATCH", "1");
     set_default_env(
         "DIALOG_GCD_SPECIAL_OVERFLOW_CLEAN_STEP_BITS",
@@ -1411,9 +1435,12 @@ fn configure_ecdsafail_submission_route() {
     // shots: 1309 x 1,503,355 = 1,967,891,695, beats the 1,968,064,139 frontier
     // by 172,444).
     set_default_env("DIALOG_GCD_APPLY_CLEAN_COMPARE_BITS", "18");
-    set_default_env("DIALOG_GCD_APPLY_BOUNDARY_CONDITIONAL_REPLAY", "1");  // BAKED: condrep ON for env-less grader build
-    set_default_env("DIALOG_GCD_SELECTED_BODY_STREAM_SUFFIX_MAP", "3:2,4:3,5:5,6:6,7:7,8:5,9:7,10:5,11:7,12:6,13:7,14:5,15:6,16:3,17:5,18:1,19:3,21:1");  // BAKED: codex 1285q peak-drop (stream selected high bits through low-qubit suffix)
-    // Bake the exact conditional-replay stack for env-less GPU hunts and grader builds.
+    set_default_env("DIALOG_GCD_APPLY_BOUNDARY_CONDITIONAL_REPLAY", "1"); // BAKED: condrep ON for env-less grader build
+    set_default_env(
+        "DIALOG_GCD_SELECTED_BODY_STREAM_SUFFIX_MAP",
+        "3:2,4:3,5:5,6:6,7:7,8:5,9:7,10:5,11:7,12:6,13:7,14:5,15:6,16:3,17:5,18:1,19:3,21:1",
+    ); // BAKED: codex 1285q peak-drop (stream selected high bits through low-qubit suffix)
+       // Bake the exact conditional-replay stack for env-less GPU hunts and grader builds.
     set_default_env("DIALOG_GCD_REVERSE_BRANCH_CONDITIONAL_REPLAY", "1");
     set_default_env("DIALOG_GCD_SPECIAL_CLEAN_CONDITIONAL_REPLAY", "1");
     set_default_env("MOD_FAST_FLAG_CONDITIONAL_REPLAY", "1");
@@ -1605,7 +1632,10 @@ fn configure_ecdsafail_submission_route() {
     // net Toffoli still beats the flat-50 baseline (1,512,823 -> 1,506,043 @ 1313).
     // Stacked peak-1302 band-trim schedule + measured-ovfclear + F_CUT4=189 (tier-3 "safe lock"):
     // trims average executed Toffoli to 1,456,963 at peak 1302 qubits.
-    set_default_env("DIALOG_GCD_BODY_CARRY_BAND_TRIMS", "0,3,3,3,3,3,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,3,3,3");
+    set_default_env(
+        "DIALOG_GCD_BODY_CARRY_BAND_TRIMS",
+        "0,3,3,3,3,3,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,3,3,3",
+    );
     set_default_env("DIALOG_GCD_TOBITVECTOR_CSWAP_BODY_TRIM", "0");
     set_default_env("DIALOG_GCD_BINDER_NOTCH_STEPS", "8,9,10");
     set_default_env("DIALOG_GCD_BINDER_NOTCH_EXTRA", "3");
@@ -1629,12 +1659,12 @@ fn configure_ecdsafail_submission_route() {
     set_default_env("R84_LOWQ", "1");
     set_default_env("R84_LOWQ_CIN_BORROW", "1");
     set_default_env("R84_QPROD_NAF", "1"); // quotient*c uses 977 = 2^10 - 2^5 - 2^4 + 1.
-    // Fold the square's high half into its low half in place, accumulate the
-    // resulting 33-bit quotient, apply quotient*(2^256-p) once, subtract once,
-    // then reversibly unfold before Bennett-uncomputing the square. The final
-    // modular subtract vents onto the folded operand, retaining the 1307q peak.
-    // The 21-bit high-carry propagation and rare folded-lo noncanonical band
-    // are selected away with the shared Fiat-Shamir island.
+                                           // Fold the square's high half into its low half in place, accumulate the
+                                           // resulting 33-bit quotient, apply quotient*(2^256-p) once, subtract once,
+                                           // then reversibly unfold before Bennett-uncomputing the square. The final
+                                           // modular subtract vents onto the folded operand, retaining the 1307q peak.
+                                           // The 21-bit high-carry propagation and rare folded-lo noncanonical band
+                                           // are selected away with the shared Fiat-Shamir island.
     set_default_env("ROUND84_INPLACE_SOLINAS_FOLD", "1");
     set_default_env("ROUND84_INPLACE_QUOTIENT_CARRY_TRUNC_W", "21");
     // Peak-bounded square (1226 tier): the round84 lam^2 schoolbook square parks
@@ -1654,7 +1684,7 @@ fn configure_ecdsafail_submission_route() {
     set_default_env("DIALOG_GCD_FOLD_PARK_LOW_CARRIES", "1");
     set_default_env("DIALOG_GCD_SPECIAL_FOLD_BORROW_CARRIES", "1");
     set_default_env("DIALOG_GCD_K2_APPLY_INPLACE_RAW_BLOCK", "1");
-    set_default_env("DIALOG_GCD_FOLD_FREED_TAIL", "1");  // BAKED: 1221 ship
+    set_default_env("DIALOG_GCD_FOLD_FREED_TAIL", "1"); // BAKED: 1221 ship
     set_default_env("DIALOG_GCD_BORROW_CURRENT_S2", "1");
     set_default_env("DIALOG_GCD_BORROW_ZERO_RAW_FUTURE", "1");
     set_default_env("DIALOG_GCD_FREE_SCRATCH_BEFORE_SHIFT", "1");
@@ -1751,7 +1781,7 @@ fn configure_ecdsafail_submission_route() {
     // Fiat-Shamir island:
     // Binder-notch fallback 8,9: nonce 169924627 validates 0/0/0 over all
     // 9024 shots at 1300q x 1,454,884 T = 1,891,349,200.
-    set_default_env("ROUND84_FOLD_FAST_ADD", "0");  // round84 Solinas-fold small adders coherent->measured-fast (-1,434 exec-T, peak-neutral 1285)
+    set_default_env("ROUND84_FOLD_FAST_ADD", "0"); // round84 Solinas-fold small adders coherent->measured-fast (-1,434 exec-T, peak-neutral 1285)
     set_default_env("DIALOG_GCD_FOLD_MAJ2", "1");
     set_default_env("DIALOG_GCD_FOLD_MAJ1", "1");
     set_default_env("DIALOG_GCD_APPLY_FINAL_TOPCLEAN", "0");
@@ -2095,7 +2125,9 @@ pub fn build() -> Vec<Op> {
     }
     if std::env::var("FOLD_FREED_TAIL_SELFTEST").is_ok() {
         match fold_freed_tail_selftest() {
-            Ok(()) => eprintln!("FOLD_FREED_TAIL_SELFTEST: PASS (freed-tail ≡ baseline, ancilla & phase clean)"),
+            Ok(()) => eprintln!(
+                "FOLD_FREED_TAIL_SELFTEST: PASS (freed-tail ≡ baseline, ancilla & phase clean)"
+            ),
             Err(e) => panic!("FOLD_FREED_TAIL_SELFTEST: FAIL: {e}"),
         }
         if std::env::var("FOLD_FREED_TAIL_SELFTEST_ONLY")
@@ -2238,12 +2270,10 @@ pub fn build() -> Vec<Op> {
     set_default_env("TLM_FUSED_CLEAN_FOLD_SKIP_TOP31", "1");
     set_default_env("TLM_GIDNEY_SKIP_SMALL_RESIDUAL_DEAD", "1");
     let mut ops = trailmix_ludicrous::build_trailmix_ludicrous_ops();
-    if std::env::var("SINGLE_CCX_FANOUT_DISABLE")
-        .ok()
-        .as_deref()
-        == Some("1")
-    {
-        return ops;
+    if std::env::var("SINGLE_CCX_FANOUT_DISABLE").ok().as_deref() == Some("1") {
+        return apply_dead_ccx_drop(mbu_clean_and::run(bilinear_toffoli::run(
+            support_rewrites::run(ops),
+        )));
     }
     let input_ops = ops.len();
     let mut fanout_passes = 0usize;
@@ -2265,14 +2295,19 @@ pub fn build() -> Vec<Op> {
             }
         }
     }
-    assert!(fanout_passes >= 1, "single-fanout rewrite failed to find first pass");
+    assert!(
+        fanout_passes >= 1,
+        "single-fanout rewrite failed to find first pass"
+    );
     eprintln!(
         "SINGLE_CCX_FANOUT: SUMMARY input_ops={} output_ops={} passes={}",
         input_ops,
         ops.len(),
         fanout_passes,
     );
-    ops
+    apply_dead_ccx_drop(mbu_clean_and::run(bilinear_toffoli::run(
+        support_rewrites::run(ops),
+    )))
 }
 
 pub fn square_window_selftest() -> Result<(), String> {
@@ -2285,8 +2320,16 @@ pub fn square_window_selftest() -> Result<(), String> {
     assert!(nbits > 0);
     let packed_value_check = 2 * nbits < 64;
     let wide_value_check = nbits <= 256;
-    let mask = if packed_value_check { (1u64 << nbits) - 1 } else { u64::MAX };
-    let out_mask = if packed_value_check { (1u64 << (2 * nbits)) - 1 } else { u64::MAX };
+    let mask = if packed_value_check {
+        (1u64 << nbits) - 1
+    } else {
+        u64::MAX
+    };
+    let out_mask = if packed_value_check {
+        (1u64 << (2 * nbits)) - 1
+    } else {
+        u64::MAX
+    };
     let xs: Vec<u64> = (0..SHOTS as u64)
         .map(|s| {
             let r = s
@@ -2387,9 +2430,8 @@ pub fn square_window_selftest() -> Result<(), String> {
                     if idx >= out_limbs {
                         break;
                     }
-                    let cur = product[idx] as u128
-                        + (x_limbs[i] as u128) * (x_limbs[j] as u128)
-                        + carry;
+                    let cur =
+                        product[idx] as u128 + (x_limbs[i] as u128) * (x_limbs[j] as u128) + carry;
                     product[idx] = cur as u64;
                     carry = cur >> 64;
                 }
@@ -2428,7 +2470,6 @@ pub fn square_window_selftest() -> Result<(), String> {
     }
     Ok(())
 }
-
 
 /// Standalone differential selftest for the fused-fold freed-tail lever
 /// (`DIALOG_GCD_FOLD_FREED_TAIL`). Runs in the normal (non-test) build because
@@ -2503,8 +2544,7 @@ pub fn fold_freed_tail_selftest() -> Result<(), String> {
                             is_add,
                         );
                     } else {
-                        let controls =
-                            secp_fold_controls(e, d, h, xed, eord, n10, hi_delta, hi_c);
+                        let controls = secp_fold_controls(e, d, h, xed, eord, n10, hi_delta, hi_c);
                         if is_add {
                             cadd_per_position_controls_trunc(&mut b, &y, &controls, last);
                         } else {
@@ -2540,7 +2580,11 @@ pub fn fold_freed_tail_selftest() -> Result<(), String> {
                 // deterministic random y per shot, including adversarial
                 // carry-propagation patterns (long runs of 1s above bit 33 that
                 // force the truncated tail carry to escape / saturate).
-                let mask: u64 = if nbits >= 64 { u64::MAX } else { (1u64 << nbits) - 1 };
+                let mask: u64 = if nbits >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << nbits) - 1
+                };
                 let ys: Vec<u64> = (0..64u64)
                     .map(|s| {
                         let r = s
@@ -2560,41 +2604,45 @@ pub fn fold_freed_tail_selftest() -> Result<(), String> {
                     })
                     .collect();
 
-                let run = |ops: &[Op], y: &[QubitId], nq: usize, nb: usize| -> (Vec<u64>, bool, u64) {
-                    let mut s2 = sha3::Shake128::default();
-                    s2.update(b"fold-sim");
-                    let mut xof2 = s2.finalize_xof();
-                    let mut sim = Simulator::new(nq, nb, &mut xof2);
-                    sim.clear_for_shot();
-                    for (shot, &yv) in ys.iter().enumerate() {
-                        for k in 0..nbits {
-                            if (yv >> k) & 1 != 0 {
-                                *sim.qubit_mut(y[k]) |= 1u64 << shot;
+                let run =
+                    |ops: &[Op], y: &[QubitId], nq: usize, nb: usize| -> (Vec<u64>, bool, u64) {
+                        let mut s2 = sha3::Shake128::default();
+                        s2.update(b"fold-sim");
+                        let mut xof2 = s2.finalize_xof();
+                        let mut sim = Simulator::new(nq, nb, &mut xof2);
+                        sim.clear_for_shot();
+                        for (shot, &yv) in ys.iter().enumerate() {
+                            for k in 0..nbits {
+                                if (yv >> k) & 1 != 0 {
+                                    *sim.qubit_mut(y[k]) |= 1u64 << shot;
+                                }
                             }
                         }
-                    }
-                    sim.apply_iter(ops.iter());
-                    let outs: Vec<u64> = (0..64)
-                        .map(|shot| {
-                            let mut v = 0u64;
-                            for k in 0..nbits {
-                                v |= ((sim.qubit(y[k]) >> shot) & 1) << k;
-                            }
-                            v
-                        })
-                        .collect();
-                    let anc_clean =
-                        (nbits..nq).all(|q| sim.qubit(QubitId(q as u64)) == 0);
-                    (outs, anc_clean, sim.phase)
-                };
+                        sim.apply_iter(ops.iter());
+                        let outs: Vec<u64> = (0..64)
+                            .map(|shot| {
+                                let mut v = 0u64;
+                                for k in 0..nbits {
+                                    v |= ((sim.qubit(y[k]) >> shot) & 1) << k;
+                                }
+                                v
+                            })
+                            .collect();
+                        let anc_clean = (nbits..nq).all(|q| sim.qubit(QubitId(q as u64)) == 0);
+                        (outs, anc_clean, sim.phase)
+                    };
                 let (out_b, clean_b, phase_b) = run(&ops_base, &y_b, nq_b, nb_b);
                 let (out_f, clean_f, phase_f) = run(&ops_freed, &y_f, nq_f, nb_f);
 
                 if !clean_b {
-                    return Err(format!("baseline left ancilla dirty (ed={ed} add={is_add} win={windowed})"));
+                    return Err(format!(
+                        "baseline left ancilla dirty (ed={ed} add={is_add} win={windowed})"
+                    ));
                 }
                 if !clean_f {
-                    return Err(format!("freed-tail left ancilla dirty (ed={ed} add={is_add} win={windowed})"));
+                    return Err(format!(
+                        "freed-tail left ancilla dirty (ed={ed} add={is_add} win={windowed})"
+                    ));
                 }
                 if phase_f != 0 {
                     return Err(format!("freed-tail left phase garbage 0x{phase_f:x} (ed={ed} add={is_add} win={windowed})"));
@@ -2701,8 +2749,7 @@ pub fn special_fold_park_selftest() -> Result<(), String> {
                 (outputs, clean, sim.phase)
             };
 
-            let (base_out, base_clean, base_phase) =
-                run(&base_ops, &base_acc, base_nq, base_nb);
+            let (base_out, base_clean, base_phase) = run(&base_ops, &base_acc, base_nq, base_nb);
             let (parked_out, parked_clean, parked_phase) =
                 run(&parked_ops, &parked_acc, parked_nq, parked_nb);
             if !base_clean || base_phase != 0 {
@@ -2730,7 +2777,6 @@ pub fn special_fold_park_selftest() -> Result<(), String> {
     }
     Ok(())
 }
-
 
 #[cfg(test)]
 mod direct_const_tests {

@@ -227,7 +227,9 @@ fn target_qubit_headroom(circ: &B) -> Option<usize> {
         .map(|target| target.saturating_sub(circ.active_qubits as usize))
 }
 
-fn next_gcd_k() -> usize { SCHED.with(|s| step(&mut s.borrow_mut().gcd_k, usize::MAX)) }
+fn next_gcd_k() -> usize {
+    SCHED.with(|s| step(&mut s.borrow_mut().gcd_k, usize::MAX))
+}
 fn next_cout_k() -> usize {
     let base = SCHED.with(|s| step(&mut s.borrow_mut().cout_k, usize::MAX));
     let fit = fit_schedule_value(
@@ -238,7 +240,10 @@ fn next_cout_k() -> usize {
         "TLM_COUT_K_CALL_OVERRIDES",
     );
     PENDING_COUT_FIT.with(|pending| {
-        debug_assert!(pending.get().is_none(), "previous COUT schedule call was not consumed");
+        debug_assert!(
+            pending.get().is_none(),
+            "previous COUT schedule call was not consumed"
+        );
         pending.set(Some(fit));
     });
     fit.selected
@@ -254,9 +259,15 @@ fn next_fold() -> i32 {
         }
     })
 }
-fn next_gcd_branch() -> u8 { SCHED.with(|s| step(&mut s.borrow_mut().gcd_branch, 255)) }
-fn next_cmp_k() -> usize { SCHED.with(|s| step(&mut s.borrow_mut().cmp_k, usize::MAX)) }
-fn next_ffg() -> usize { SCHED.with(|s| sub_delta(step(&mut s.borrow_mut().ffg, usize::MAX), "TLM_FFG_DELTA")) }
+fn next_gcd_branch() -> u8 {
+    SCHED.with(|s| step(&mut s.borrow_mut().gcd_branch, 255))
+}
+fn next_cmp_k() -> usize {
+    SCHED.with(|s| step(&mut s.borrow_mut().cmp_k, usize::MAX))
+}
+fn next_ffg() -> usize {
+    SCHED.with(|s| sub_delta(step(&mut s.borrow_mut().ffg, usize::MAX), "TLM_FFG_DELTA"))
+}
 fn next_hyb_v_fit() -> ScheduleFit {
     let base = SCHED.with(|s| step(&mut s.borrow_mut().hyb_v, usize::MAX));
     fit_schedule_value(
@@ -281,7 +292,9 @@ fn take_cout_fit(selected: usize) -> ScheduleFit {
         })
     })
 }
-fn next_sqrow_k() -> usize { SCHED.with(|s| step(&mut s.borrow_mut().sqrow_k, usize::MAX)) }
+fn next_sqrow_k() -> usize {
+    SCHED.with(|s| step(&mut s.borrow_mut().sqrow_k, usize::MAX))
+}
 
 /// Load the product-min jump schedule onto the thread-local cursors.
 fn load_schedule() {
@@ -291,6 +304,7 @@ fn load_schedule() {
     fused::reset_fold_call_index();
     gcd::reset_gcd_trace_call_index();
     gidney::reset_gidney_call_index();
+    mcx::reset_kg_prefix_mbu_counter();
     SCHED.with(|s| {
         let mut s = s.borrow_mut();
         *s = Sched::default();
@@ -309,10 +323,7 @@ fn load_schedule() {
         let fold_g = |v: &[usize]| -> Vec<usize> {
             v.iter()
                 .map(|&x| {
-                    if extra_fold_vents > 0
-                        && x >= extra_fold_min_g
-                        && x <= extra_fold_max_g
-                    {
+                    if extra_fold_vents > 0 && x >= extra_fold_min_g && x <= extra_fold_max_g {
                         x.saturating_add(extra_fold_vents).min(53)
                     } else {
                         x
@@ -372,9 +383,7 @@ fn install_q1153_submission_defaults() {
         ("TLM_APPLY_ADD_SKIP_LASTK", "1"),
         ("DIALOG_TAIL_NONCE", "2430844"),
     ] {
-        if name == "DIALOG_TAIL_NONCE" && std::env::var_os(name).is_some() {
-            continue;
-        } else {
+        if std::env::var_os(name).is_none() {
             std::env::set_var(name, value);
         }
     }
@@ -415,7 +424,11 @@ pub fn build_trailmix_ludicrous_ops() -> Vec<Op> {
         .and_then(|s| s.parse::<u64>().ok())
     {
         for i in 0..48u32 {
-            let q = if (nonce >> i) & 1 == 1 { x2_init[1] } else { x2_init[0] };
+            let q = if (nonce >> i) & 1 == 1 {
+                x2_init[1]
+            } else {
+                x2_init[0]
+            };
             circ.x(q);
             circ.x(q);
         }

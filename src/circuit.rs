@@ -1,9 +1,8 @@
 /// This file contains code for working with kickmix circuit files.
-
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
 use std::num::ParseIntError;
+use std::path::Path;
 
 fn parse_u64_below_max(s: &str) -> Result<u64, ParseIntError> {
     let result: u64 = s.parse().unwrap();
@@ -45,7 +44,7 @@ pub enum OperationType {
     CCX = 13,
     /// Phase-flips states where three qubits are all 1.
     CCZ = 14,
-   /// Pushes a bit onto the condition stack.
+    /// Pushes a bit onto the condition stack.
     /// (Operations other than PUSH_CONDITION/POP_CONDITION do not
     /// occur unless all values on the condition stack are True.)
     PushCondition = 15,
@@ -128,13 +127,22 @@ impl Op {
     pub fn validate(&self) {
         // Check for qubit aliasing.
         if self.q_target == self.q_control1 && self.q_target != NO_QUBIT {
-            panic!("kind={:?} and q_target==q_control1==q{}", self.kind, self.q_target.0);
+            panic!(
+                "kind={:?} and q_target==q_control1==q{}",
+                self.kind, self.q_target.0
+            );
         }
         if self.q_target == self.q_control2 && self.q_target != NO_QUBIT {
-            panic!("kind={:?} and q_target==q_control2==q{}", self.kind, self.q_target.0);
+            panic!(
+                "kind={:?} and q_target==q_control2==q{}",
+                self.kind, self.q_target.0
+            );
         }
         if self.q_control1 == self.q_control2 && self.q_control1 != NO_QUBIT {
-            panic!("kind={:?} and q_control1==q_control2==q{}", self.kind, self.q_control1.0);
+            panic!(
+                "kind={:?} and q_control1==q_control2==q{}",
+                self.kind, self.q_control1.0
+            );
         }
 
         const BANNED: u8 = 0;
@@ -155,7 +163,10 @@ impl Op {
             }
             OperationType::AppendToRegister => {
                 if (self.q_target == NO_QUBIT) == (self.c_target == NO_BIT) {
-                    panic!("kind={:?} needs exactly one qubit target or bit target", self.kind);
+                    panic!(
+                        "kind={:?} needs exactly one qubit target or bit target",
+                        self.kind
+                    );
                 }
                 c_target_flag = ALLOWED;
                 q_target_flag = ALLOWED;
@@ -342,9 +353,6 @@ impl Circuit {
     }
 }
 
-
-
-
 pub fn analyze_ops<'b>(ops: impl Iterator<Item = &'b Op>) -> (u64, u64, u64, Vec<Vec<QubitOrBit>>) {
     let mut registers: Vec<Vec<QubitOrBit>> = Vec::new();
     let mut num_qubits = 0u64;
@@ -375,7 +383,8 @@ pub fn analyze_ops<'b>(ops: impl Iterator<Item = &'b Op>) -> (u64, u64, u64, Vec
         }
         if native_op.kind == OperationType::AppendToRegister {
             if native_op.q_target != NO_QUBIT {
-                registers[native_op.r_target.0 as usize].push(QubitOrBit::Qubit(native_op.q_target));
+                registers[native_op.r_target.0 as usize]
+                    .push(QubitOrBit::Qubit(native_op.q_target));
             }
             if native_op.c_target != NO_BIT {
                 registers[native_op.r_target.0 as usize].push(QubitOrBit::Bit(native_op.c_target));
@@ -385,5 +394,3 @@ pub fn analyze_ops<'b>(ops: impl Iterator<Item = &'b Op>) -> (u64, u64, u64, Vec
 
     (num_qubits, num_bits, num_registers, registers)
 }
-
-

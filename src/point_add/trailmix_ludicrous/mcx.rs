@@ -3,8 +3,15 @@
 //! propagates the fold carry into the high bits via a cascade of `mcx_clean_k`
 //! calls.
 
-use super::{B, BExt};
-use crate::circuit::{QubitId};
+use super::{BExt, B};
+use crate::circuit::QubitId;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static KG_PREFIX_MBU_CANDIDATES: AtomicUsize = AtomicUsize::new(0);
+
+pub(super) fn reset_kg_prefix_mbu_counter() {
+    KG_PREFIX_MBU_CANDIDATES.store(0, Ordering::Relaxed);
+}
 
 /// Clear `t = c0 AND c1` back to |0> by measurement (HMR + cz_if_bit, 0
 /// Toffoli). `c0`,`c1` must be alive/unmodified since the AND.
@@ -13,6 +20,36 @@ fn mbu_clear_and(circ: &mut B, t: &QubitId, c0: &QubitId, c1: &QubitId) {
     circ.hmr(*t, bit);
     circ.cz_if_bit(*c0, *c1, bit);
     circ.zero_and_free(*t);
+}
+
+fn mbu_clear_and_keep(circ: &mut B, t: &QubitId, c0: &QubitId, c1: &QubitId) {
+    let bit = circ.alloc_bit();
+    circ.hmr(*t, bit);
+    circ.cz_if_bit(*c0, *c1, bit);
+}
+
+fn kg_prefix_mbu_enabled() -> bool {
+    std::env::var("TLM_KG_PREFIX_MBU").ok().as_deref() == Some("1")
+}
+
+fn kg_prefix_mbu_should_rewrite() -> bool {
+    if !kg_prefix_mbu_enabled() {
+        return false;
+    }
+    let idx = KG_PREFIX_MBU_CANDIDATES.fetch_add(1, Ordering::Relaxed);
+    let start = env_usize("TLM_KG_PREFIX_MBU_START").unwrap_or(0);
+    let limit = env_usize("TLM_KG_PREFIX_MBU_LIMIT").unwrap_or(usize::MAX);
+    let rewrite = idx >= start && idx < start.saturating_add(limit);
+    if std::env::var("TLM_KG_PREFIX_MBU_TRACE").ok().as_deref() == Some("1") && rewrite {
+        eprintln!("TLM_KG_PREFIX_MBU rewrite_candidate={idx}");
+    }
+    rewrite
+}
+
+fn env_usize(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
 }
 
 fn kg_get_layer_id(x: usize) -> usize {
@@ -52,7 +89,10 @@ fn kg_apply_prefix_controlled_x(circ: &mut B, ctrls: &[&QubitId], target: &Qubit
         [] => circ.x(*target),
         [c] => circ.cx(**c, *target),
         [a, b] => circ.ccx(**a, **b, *target),
-        _ => panic!("kg_apply_prefix_controlled_x: expected <=2 ctrls, got {}", ctrls.len()),
+        _ => panic!(
+            "kg_apply_prefix_controlled_x: expected <=2 ctrls, got {}",
+            ctrls.len()
+        ),
     }
 }
 
@@ -79,6 +119,34 @@ impl KgPrefixOp<'_> {
     }
 }
 
+fn emit_reverse_layer_ops(circ: &mut B, ops: &[KgPrefixOp<'_>]) {
+    let mut i = ops.len();
+    while i > 0 {
+        match ops[i - 1] {
+            KgPrefixOp::Ccx(a, b, t) => {
+                let complemented =
+                    i >= 2 && matches!(ops[i - 2], KgPrefixOp::X(x) if std::ptr::eq(x, t));
+                if complemented || !kg_prefix_mbu_should_rewrite() {
+                    circ.ccx(*a, *b, *t);
+                    if complemented {
+                        circ.x(*t);
+                        i -= 2;
+                    } else {
+                        i -= 1;
+                    }
+                } else {
+                    mbu_clear_and_keep(circ, t, a, b);
+                    i -= 1;
+                }
+            }
+            KgPrefixOp::X(q) => {
+                circ.x(*q);
+                i -= 1;
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 struct KgPrefixLayer<'a> {
     ctrls: Vec<&'a QubitId>,
@@ -89,11 +157,20 @@ fn kg_get_layers_for_prefix_and<'a>(
     q: &[&'a QubitId],
     inp_anc: &[&'a QubitId],
 ) -> Vec<KgPrefixLayer<'a>> {
-    assert!(!q.is_empty(), "kg_get_layers_for_prefix_and: q must be non-empty");
+    assert!(
+        !q.is_empty(),
+        "kg_get_layers_for_prefix_and: q must be non-empty"
+    );
     if q.len() == 1 {
         return vec![
-            KgPrefixLayer { ctrls: Vec::new(), ops: Vec::new() },
-            KgPrefixLayer { ctrls: vec![q[0]], ops: Vec::new() },
+            KgPrefixLayer {
+                ctrls: Vec::new(),
+                ops: Vec::new(),
+            },
+            KgPrefixLayer {
+                ctrls: vec![q[0]],
+                ops: Vec::new(),
+            },
         ];
     }
     assert!(
@@ -106,7 +183,10 @@ fn kg_get_layers_for_prefix_and<'a>(
 
     let n = q.len();
     let n_layers = kg_get_layer_id(q.len() - 1);
-    let mut ret = vec![KgPrefixLayer { ctrls: Vec::new(), ops: Vec::new() }];
+    let mut ret = vec![KgPrefixLayer {
+        ctrls: Vec::new(),
+        ops: Vec::new(),
+    }];
     let mut targets: Vec<&'a QubitId> = Vec::new();
     let mut anc: Vec<&'a QubitId> = vec![inp_anc[0]];
 
@@ -116,7 +196,10 @@ fn kg_get_layers_for_prefix_and<'a>(
 
         let mut layer_ctrls = targets.clone();
         layer_ctrls.push(q[st]);
-        ret.push(KgPrefixLayer { ctrls: layer_ctrls, ops: Vec::new() });
+        ret.push(KgPrefixLayer {
+            ctrls: layer_ctrls,
+            ops: Vec::new(),
+        });
 
         for i in (st + 1)..en {
             let offset = i - st;
@@ -156,7 +239,10 @@ fn kg_get_layers_for_prefix_and<'a>(
         return ret;
     }
 
-    ret.push(KgPrefixLayer { ctrls: Vec::new(), ops: Vec::new() });
+    ret.push(KgPrefixLayer {
+        ctrls: Vec::new(),
+        ops: Vec::new(),
+    });
     let target_prefix_layers = kg_get_layers_for_prefix_and(&targets, &inp_anc[2..]);
     for layer_id in 1..=n_layers {
         let st = kg_start_layer(layer_id);
@@ -235,9 +321,7 @@ fn xor_and_of_khattar_gidney_refs(circ: &mut B, bits: &[&QubitId], target: &Qubi
         if i == bits.len() {
             kg_apply_prefix_controlled_x(circ, &layer.ctrls, target);
         }
-        for &op in layer.ops.iter().rev() {
-            op.emit(circ);
-        }
+        emit_reverse_layer_ops(circ, &layer.ops);
     }
     drop(layers);
     drop(anc_refs);
@@ -329,9 +413,7 @@ fn inc_khattar_gidney_refs_inner(circ: &mut B, a: &[&QubitId], skip_lsb_x: bool)
         if i < n && !(i == 0 && skip_lsb_x) {
             kg_apply_prefix_controlled_x(circ, &layer.ctrls, a[i]);
         }
-        for &op in layer.ops.iter().rev() {
-            op.emit(circ);
-        }
+        emit_reverse_layer_ops(circ, &layer.ops);
     }
 
     drop(layers);

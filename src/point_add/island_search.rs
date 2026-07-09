@@ -22,15 +22,17 @@
 
 #![allow(dead_code)]
 
-use crate::circuit::Op;
+use crate::circuit::{analyze_ops, Op, OperationType, QubitId, QubitOrBit, NO_BIT};
 use crate::point_add::dialog_gcd_classical_filter::{
     check_point_add_apply_hazards, point_add_gcd_factors, sub_mod_p, DialogApplyFilterConfig,
     DialogGcdFilterConfig,
 };
+use crate::sim::Simulator;
 use crate::weierstrass_elliptic_curve::WeierstrassEllipticCurve;
 use alloy_primitives::U256;
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::Shake256;
+use std::collections::BTreeMap;
 
 const NONCE_BITS: usize = 48;
 const TAIL_OPS: usize = NONCE_BITS * 2;
@@ -63,12 +65,30 @@ fn secp256k1() -> WeierstrassEllipticCurve {
 // for the CUDA port). Validated to reproduce sha3's golden k1,k2. ────────────
 
 const KECCAK_RC: [u64; 24] = [
-    0x0000000000000001, 0x0000000000008082, 0x800000000000808a, 0x8000000080008000,
-    0x000000000000808b, 0x0000000080000001, 0x8000000080008081, 0x8000000000008009,
-    0x000000000000008a, 0x0000000000000088, 0x0000000080008009, 0x000000008000000a,
-    0x000000008000808b, 0x800000000000008b, 0x8000000000008089, 0x8000000000008003,
-    0x8000000000008002, 0x8000000000000080, 0x000000000000800a, 0x800000008000000a,
-    0x8000000080008081, 0x8000000000008080, 0x0000000080000001, 0x8000000080008008,
+    0x0000000000000001,
+    0x0000000000008082,
+    0x800000000000808a,
+    0x8000000080008000,
+    0x000000000000808b,
+    0x0000000080000001,
+    0x8000000080008081,
+    0x8000000000008009,
+    0x000000000000008a,
+    0x0000000000000088,
+    0x0000000080008009,
+    0x000000008000000a,
+    0x000000008000808b,
+    0x800000000000008b,
+    0x8000000000008089,
+    0x8000000000008003,
+    0x8000000000008002,
+    0x8000000000000080,
+    0x000000000000800a,
+    0x800000008000000a,
+    0x8000000080008081,
+    0x8000000000008080,
+    0x0000000080000001,
+    0x8000000080008008,
 ];
 const KECCAK_ROT: [u32; 25] = [
     0, 1, 62, 28, 27, 36, 44, 6, 55, 20, 3, 10, 43, 25, 39, 41, 45, 15, 21, 8, 18, 2, 61, 56, 14,
@@ -119,7 +139,11 @@ pub struct Sponge {
 }
 impl Sponge {
     pub fn new() -> Sponge {
-        Sponge { st: [0u64; 25], buf: [0u8; SHAKE256_RATE], buflen: 0 }
+        Sponge {
+            st: [0u64; 25],
+            buf: [0u8; SHAKE256_RATE],
+            buflen: 0,
+        }
     }
     fn absorb_block(&mut self) {
         for i in 0..(SHAKE256_RATE / 8) {
@@ -148,7 +172,10 @@ impl Sponge {
         self.buf[SHAKE256_RATE - 1] ^= 0x80;
         self.absorb_block();
         // Post-finalize state IS the first squeeze block; read from pos 0.
-        SqueezeReader { st: self.st, pos: 0 }
+        SqueezeReader {
+            st: self.st,
+            pos: 0,
+        }
     }
 }
 pub struct SqueezeReader {
@@ -426,11 +453,921 @@ pub fn screen_nonce(
     NonceReport { nonce, shots, hard }
 }
 
+fn exact_clean_prefix(
+    ops: &[Op],
+    regs: &[Vec<QubitOrBit>],
+    total_qubits: u64,
+    num_bits: u64,
+    prefix: &PrefixState,
+    curve: &WeierstrassEllipticCurve,
+    comb: &CombTable,
+    nonce: u64,
+    target_shots: usize,
+) -> usize {
+    let mut xof = prefix.xof_for(nonce);
+
+    let mut targets = Vec::with_capacity(target_shots);
+    let mut offsets = Vec::with_capacity(target_shots);
+    let mut expected = Vec::with_capacity(target_shots);
+    for _ in 0..target_shots {
+        let mut rb = [[0u8; 32]; 2];
+        XofReader::read(&mut xof, &mut rb[0]);
+        XofReader::read(&mut xof, &mut rb[1]);
+        let k1 = U256::from_le_bytes(rb[0]);
+        let k2 = U256::from_le_bytes(rb[1]);
+        let t = mul_g(comb, curve, k1);
+        let o = mul_g(comb, curve, k2);
+        if t.0 == o.0 {
+            continue;
+        }
+        if t.0.is_zero() && t.1.is_zero() {
+            continue;
+        }
+        if o.0.is_zero() && o.1.is_zero() {
+            continue;
+        }
+        let e = curve.add(t.0, t.1, o.0, o.1);
+        targets.push(t);
+        offsets.push(o);
+        expected.push(e);
+    }
+
+    let mut sim = Simulator::new(total_qubits as usize, num_bits as usize, &mut xof);
+    let mut clean = 0usize;
+
+    const BATCH: usize = 64;
+    let n = targets.len();
+    let num_batches = (n + BATCH - 1) / BATCH;
+    for batch in 0..num_batches {
+        let bs = BATCH.min(n - batch * BATCH);
+        let cond_mask: u64 = if bs == 64 { u64::MAX } else { (1u64 << bs) - 1 };
+
+        sim.clear_for_shot();
+        for shot in 0..bs {
+            let i = batch * BATCH + shot;
+            sim.set_register(&regs[0], targets[i].0, shot);
+            sim.set_register(&regs[1], targets[i].1, shot);
+            sim.set_register(&regs[2], offsets[i].0, shot);
+            sim.set_register(&regs[3], offsets[i].1, shot);
+        }
+
+        sim.apply_iter(ops.iter());
+
+        for shot in 0..bs {
+            let i = batch * BATCH + shot;
+            let gx = sim.get_register(&regs[0], shot);
+            let gy = sim.get_register(&regs[1], shot);
+            if gx != expected[i].0 || gy != expected[i].1 {
+                return clean + shot;
+            }
+        }
+
+        if (sim.phase & cond_mask) != 0 {
+            return clean;
+        }
+
+        for register in regs {
+            for qb in register {
+                if let QubitOrBit::Qubit(q) = *qb {
+                    *sim.qubit_mut(q) = 0;
+                }
+            }
+        }
+        for q in 0..total_qubits {
+            if (sim.qubit(QubitId(q)) & cond_mask) != 0 {
+                return clean;
+            }
+        }
+
+        clean += bs;
+    }
+
+    clean
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ExactReport {
+    nonce: u64,
+    shots: usize,
+    classical_failures: usize,
+    phase_garbage_batches: usize,
+    ancilla_garbage_batches: usize,
+    avg_tof: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TofFireStats {
+    charged: u64,
+    fired: u64,
+    charged_batches: u32,
+    zero_fire_batches: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TofFireOpMeta {
+    op_index: usize,
+    kind: OperationType,
+    q_control2: u64,
+    q_control1: u64,
+    q_target: u64,
+    site: Option<crate::point_add::OpSite>,
+}
+
+#[derive(Clone, Debug)]
+struct TofFireProfile {
+    ops: Vec<TofFireOpMeta>,
+    stats: Vec<TofFireStats>,
+    batches: usize,
+}
+
+#[derive(Default)]
+struct TofFireSiteAgg {
+    ops: usize,
+    zero_fire_ops: usize,
+    charged: u64,
+    fired: u64,
+    charged_batches: u64,
+    zero_fire_batches: u64,
+}
+
+impl TofFireProfile {
+    fn new(ops: &[Op], sites: Option<&[crate::point_add::OpSite]>) -> Self {
+        let sites = sites.filter(|sites| sites.len() == ops.len());
+        let tof_ops: Vec<TofFireOpMeta> = ops
+            .iter()
+            .enumerate()
+            .filter_map(|(op_index, op)| {
+                if !matches!(op.kind, OperationType::CCX | OperationType::CCZ) {
+                    return None;
+                }
+                Some(TofFireOpMeta {
+                    op_index,
+                    kind: op.kind,
+                    q_control2: op.q_control2.0,
+                    q_control1: op.q_control1.0,
+                    q_target: op.q_target.0,
+                    site: sites.map(|sites| sites[op_index]),
+                })
+            })
+            .collect();
+        let stats = vec![TofFireStats::default(); tof_ops.len()];
+        Self {
+            ops: tof_ops,
+            stats,
+            batches: 0,
+        }
+    }
+
+    fn record_batch_start(&mut self) {
+        self.batches += 1;
+    }
+
+    fn record_tof(&mut self, tof_cursor: usize, charged: u64, fired: u64) {
+        let stat = &mut self.stats[tof_cursor];
+        stat.charged += charged;
+        stat.fired += fired;
+        if charged != 0 {
+            stat.charged_batches += 1;
+            if fired == 0 {
+                stat.zero_fire_batches += 1;
+            }
+        }
+    }
+
+    fn print_report(&self, nonce: u64, shots: usize) {
+        let top = env_usize("TOF_FIRE_PROFILE_TOP", 40);
+        let min_charged = env_u64("TOF_FIRE_PROFILE_MIN_CHARGED", 1);
+        let site_filter = std::env::var("TOF_FIRE_PROFILE_SITE_FILTER").ok();
+
+        let total_charged: u64 = self.stats.iter().map(|s| s.charged).sum();
+        let total_fired: u64 = self.stats.iter().map(|s| s.fired).sum();
+        let zero_fire_ops = self
+            .stats
+            .iter()
+            .filter(|s| s.charged >= min_charged && s.fired == 0)
+            .count();
+        eprintln!(
+            "TOF_FIRE_PROFILE nonce={} shots={} batches={} tof_ops={} total_charged={} total_fire={} wasted={} zero_fire_ops={} top={} min_charged={}",
+            nonce,
+            shots,
+            self.batches,
+            self.ops.len(),
+            total_charged,
+            total_fired,
+            total_charged.saturating_sub(total_fired),
+            zero_fire_ops,
+            top,
+            min_charged,
+        );
+
+        let mut rows: Vec<usize> = (0..self.ops.len())
+            .filter(|&idx| {
+                let stat = self.stats[idx];
+                if stat.charged < min_charged {
+                    return false;
+                }
+                if let Some(filter) = &site_filter {
+                    return format_site(self.ops[idx].site, true).contains(filter);
+                }
+                true
+            })
+            .collect();
+        rows.sort_by(|&left, &right| {
+            let l = self.stats[left];
+            let r = self.stats[right];
+            let lw = l.charged.saturating_sub(l.fired);
+            let rw = r.charged.saturating_sub(r.fired);
+            rw.cmp(&lw)
+                .then_with(|| r.charged.cmp(&l.charged))
+                .then_with(|| l.fired.cmp(&r.fired))
+                .then_with(|| self.ops[left].op_index.cmp(&self.ops[right].op_index))
+        });
+        for &idx in rows.iter().take(top) {
+            self.print_row("TOF_FIRE_ROW", idx);
+        }
+
+        let mut zero_rows: Vec<usize> = rows
+            .iter()
+            .copied()
+            .filter(|&idx| self.stats[idx].charged >= min_charged && self.stats[idx].fired == 0)
+            .collect();
+        zero_rows.sort_by(|&left, &right| {
+            let l = self.stats[left];
+            let r = self.stats[right];
+            r.charged
+                .cmp(&l.charged)
+                .then_with(|| r.zero_fire_batches.cmp(&l.zero_fire_batches))
+                .then_with(|| self.ops[left].op_index.cmp(&self.ops[right].op_index))
+        });
+        for &idx in zero_rows.iter().take(top) {
+            self.print_row("TOF_ZERO_FIRE_ROW", idx);
+        }
+
+        self.print_site_report(
+            "TOF_FIRE_SITE",
+            true,
+            top,
+            min_charged,
+            site_filter.as_deref(),
+        );
+        self.print_site_report(
+            "TOF_FIRE_BASE_SITE",
+            false,
+            top,
+            min_charged,
+            site_filter.as_deref(),
+        );
+    }
+
+    fn print_row(&self, label: &str, idx: usize) {
+        let meta = self.ops[idx];
+        let stat = self.stats[idx];
+        eprintln!(
+            "{} wasted={} charged={} fire={} zero_batches={}/{} op={} kind={:?} q=({},{},{}) site={}",
+            label,
+            stat.charged.saturating_sub(stat.fired),
+            stat.charged,
+            stat.fired,
+            stat.zero_fire_batches,
+            stat.charged_batches,
+            meta.op_index,
+            meta.kind,
+            meta.q_control2,
+            meta.q_control1,
+            meta.q_target,
+            format_site(meta.site, true),
+        );
+    }
+
+    fn print_site_report(
+        &self,
+        label: &str,
+        include_context: bool,
+        top: usize,
+        min_charged: u64,
+        site_filter: Option<&str>,
+    ) {
+        let mut agg = BTreeMap::<String, TofFireSiteAgg>::new();
+        for (idx, meta) in self.ops.iter().enumerate() {
+            let stat = self.stats[idx];
+            if stat.charged < min_charged {
+                continue;
+            }
+            let site = format_site(meta.site, include_context);
+            if let Some(filter) = site_filter {
+                if !site.contains(filter) {
+                    continue;
+                }
+            }
+            let entry = agg.entry(site).or_default();
+            entry.ops += 1;
+            entry.charged += stat.charged;
+            entry.fired += stat.fired;
+            entry.charged_batches += stat.charged_batches as u64;
+            entry.zero_fire_batches += stat.zero_fire_batches as u64;
+            if stat.fired == 0 {
+                entry.zero_fire_ops += 1;
+            }
+        }
+        let mut rows: Vec<_> = agg.into_iter().collect();
+        rows.sort_by(|left, right| {
+            let lw = left.1.charged.saturating_sub(left.1.fired);
+            let rw = right.1.charged.saturating_sub(right.1.fired);
+            rw.cmp(&lw)
+                .then_with(|| right.1.charged.cmp(&left.1.charged))
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        for (site, row) in rows.into_iter().take(top) {
+            eprintln!(
+                "{} wasted={} charged={} fire={} ops={} zero_ops={} zero_batches={} charged_batches={} site={}",
+                label,
+                row.charged.saturating_sub(row.fired),
+                row.charged,
+                row.fired,
+                row.ops,
+                row.zero_fire_ops,
+                row.zero_fire_batches,
+                row.charged_batches,
+                site,
+            );
+        }
+    }
+}
+
+fn format_site(site: Option<crate::point_add::OpSite>, include_context: bool) -> String {
+    match site {
+        Some((file, line, context)) if include_context => {
+            format!("{file}:{line}#0x{context:08x}")
+        }
+        Some((file, line, _)) => format!("{file}:{line}"),
+        None => "<site-unavailable>".to_string(),
+    }
+}
+
+fn tof_fire_profile_requested() -> bool {
+    std::env::var_os("TOF_FIRE_PROFILE").is_some()
+        || std::env::var_os("TOF_FIRE_PROFILE_TOP").is_some()
+        || std::env::var_os("TOF_FIRE_PROFILE_SITE_FILTER").is_some()
+}
+
+fn apply_iter_with_tof_profile<R: XofReader>(
+    sim: &mut Simulator<'_, R>,
+    ops: &[Op],
+    profile: &mut TofFireProfile,
+) {
+    let mut condition_stack = Vec::new();
+    let mut current_base_condition = u64::MAX;
+    let mut tof_cursor = 0usize;
+    profile.record_batch_start();
+
+    for op in ops {
+        let mut cond = current_base_condition;
+        if op.c_condition != NO_BIT {
+            cond &= sim.bit(op.c_condition);
+        }
+
+        let executed_shots = cond.count_ones() as u64;
+
+        match op.kind {
+            OperationType::CCZ | OperationType::CCX => {
+                sim.stats.toffoli_gates += executed_shots;
+            }
+            OperationType::CX
+            | OperationType::CZ
+            | OperationType::Swap
+            | OperationType::R
+            | OperationType::Hmr => {
+                sim.stats.clifford_gates += executed_shots;
+            }
+            _ => {}
+        }
+
+        match op.kind {
+            OperationType::CCX => {
+                let v = cond & sim.qubit(op.q_control1) & sim.qubit(op.q_control2);
+                profile.record_tof(tof_cursor, executed_shots, v.count_ones() as u64);
+                tof_cursor += 1;
+                *sim.qubit_mut(op.q_target) ^= v;
+            }
+            OperationType::CX => {
+                let v = cond & sim.qubit(op.q_control1);
+                *sim.qubit_mut(op.q_target) ^= v;
+            }
+            OperationType::Swap => {
+                let mut q_c1 = sim.qubit(op.q_control1);
+                let mut q_t = sim.qubit(op.q_target);
+                q_c1 ^= q_t;
+                q_t ^= cond & q_c1;
+                q_c1 ^= q_t;
+                *sim.qubit_mut(op.q_control1) = q_c1;
+                *sim.qubit_mut(op.q_target) = q_t;
+            }
+            OperationType::X => {
+                *sim.qubit_mut(op.q_target) ^= cond;
+            }
+            OperationType::CCZ => {
+                let v = cond
+                    & sim.qubit(op.q_target)
+                    & sim.qubit(op.q_control1)
+                    & sim.qubit(op.q_control2);
+                profile.record_tof(tof_cursor, executed_shots, v.count_ones() as u64);
+                tof_cursor += 1;
+                sim.phase ^= v;
+            }
+            OperationType::CZ => {
+                let v = cond & sim.qubit(op.q_target) & sim.qubit(op.q_control1);
+                sim.phase ^= v;
+            }
+            OperationType::Z => {
+                let v = cond & sim.qubit(op.q_target);
+                sim.phase ^= v;
+            }
+            OperationType::Neg => {
+                sim.phase ^= cond;
+            }
+            OperationType::Hmr => {
+                let mut buf = [0u8; 8];
+                sim.xof.read(&mut buf);
+                let rng_val = u64::from_le_bytes(buf);
+                *sim.bit_mut(op.c_target) &= !cond;
+                *sim.bit_mut(op.c_target) ^= rng_val & cond;
+                sim.phase ^= sim.qubit(op.q_target) & rng_val & cond;
+                *sim.qubit_mut(op.q_target) &= !cond;
+            }
+            OperationType::R => {
+                let mut buf = [0u8; 8];
+                sim.xof.read(&mut buf);
+                let rng_val = u64::from_le_bytes(buf);
+                sim.phase ^= sim.qubit(op.q_target) & rng_val & cond;
+                *sim.qubit_mut(op.q_target) &= !cond;
+            }
+            OperationType::BitInvert => {
+                *sim.bit_mut(op.c_target) ^= cond;
+            }
+            OperationType::BitStore0 => {
+                *sim.bit_mut(op.c_target) &= !cond;
+            }
+            OperationType::BitStore1 => {
+                *sim.bit_mut(op.c_target) |= cond;
+            }
+            OperationType::AppendToRegister
+            | OperationType::Register
+            | OperationType::DebugPrint => {}
+            OperationType::PushCondition => {
+                condition_stack.push(current_base_condition);
+                current_base_condition &= sim.bit(op.c_condition);
+            }
+            OperationType::PopCondition => {
+                if let Some(val) = condition_stack.pop() {
+                    current_base_condition = val;
+                }
+            }
+        }
+    }
+    assert_eq!(
+        tof_cursor,
+        profile.ops.len(),
+        "profiled Toffoli cursor did not consume all Toffoli ops"
+    );
+}
+
+fn exact_report(
+    ops: &[Op],
+    regs: &[Vec<QubitOrBit>],
+    total_qubits: u64,
+    num_bits: u64,
+    prefix: &PrefixState,
+    curve: &WeierstrassEllipticCurve,
+    comb: &CombTable,
+    profile_sites: Option<&[crate::point_add::OpSite]>,
+    nonce: u64,
+    target_shots: usize,
+) -> ExactReport {
+    let mut xof = prefix.xof_for(nonce);
+
+    let mut targets = Vec::with_capacity(target_shots);
+    let mut offsets = Vec::with_capacity(target_shots);
+    let mut expected = Vec::with_capacity(target_shots);
+    for _ in 0..target_shots {
+        let mut rb = [[0u8; 32]; 2];
+        XofReader::read(&mut xof, &mut rb[0]);
+        XofReader::read(&mut xof, &mut rb[1]);
+        let k1 = U256::from_le_bytes(rb[0]);
+        let k2 = U256::from_le_bytes(rb[1]);
+        let t = mul_g(comb, curve, k1);
+        let o = mul_g(comb, curve, k2);
+        if t.0 == o.0 {
+            continue;
+        }
+        if t.0.is_zero() && t.1.is_zero() {
+            continue;
+        }
+        if o.0.is_zero() && o.1.is_zero() {
+            continue;
+        }
+        let e = curve.add(t.0, t.1, o.0, o.1);
+        targets.push(t);
+        offsets.push(o);
+        expected.push(e);
+    }
+
+    let mut sim = Simulator::new(total_qubits as usize, num_bits as usize, &mut xof);
+    let mut classical_failures = 0usize;
+    let mut phase_garbage_batches = 0usize;
+    let mut ancilla_garbage_batches = 0usize;
+    let mut tof_profile = if tof_fire_profile_requested() {
+        Some(TofFireProfile::new(ops, profile_sites))
+    } else {
+        None
+    };
+
+    const BATCH: usize = 64;
+    let n = targets.len();
+    let num_batches = (n + BATCH - 1) / BATCH;
+    for batch in 0..num_batches {
+        let bs = BATCH.min(n - batch * BATCH);
+        let cond_mask: u64 = if bs == 64 { u64::MAX } else { (1u64 << bs) - 1 };
+
+        sim.clear_for_shot();
+        for shot in 0..bs {
+            let i = batch * BATCH + shot;
+            sim.set_register(&regs[0], targets[i].0, shot);
+            sim.set_register(&regs[1], targets[i].1, shot);
+            sim.set_register(&regs[2], offsets[i].0, shot);
+            sim.set_register(&regs[3], offsets[i].1, shot);
+        }
+
+        if let Some(profile) = tof_profile.as_mut() {
+            apply_iter_with_tof_profile(&mut sim, ops, profile);
+        } else {
+            sim.apply_iter(ops.iter());
+        }
+
+        for shot in 0..bs {
+            let i = batch * BATCH + shot;
+            let gx = sim.get_register(&regs[0], shot);
+            let gy = sim.get_register(&regs[1], shot);
+            if gx != expected[i].0 || gy != expected[i].1 {
+                classical_failures += 1;
+            }
+        }
+
+        if (sim.phase & cond_mask) != 0 {
+            phase_garbage_batches += 1;
+        }
+
+        for register in regs {
+            for qb in register {
+                if let QubitOrBit::Qubit(q) = *qb {
+                    *sim.qubit_mut(q) = 0;
+                }
+            }
+        }
+        let mut has_garbage = false;
+        for q in 0..total_qubits {
+            if (sim.qubit(QubitId(q)) & cond_mask) != 0 {
+                has_garbage = true;
+                break;
+            }
+        }
+        if has_garbage {
+            ancilla_garbage_batches += 1;
+        }
+    }
+
+    let denom = n.max(1) as f64;
+    if let Some(profile) = tof_profile.as_ref() {
+        profile.print_report(nonce, n);
+    }
+    ExactReport {
+        nonce,
+        shots: n,
+        classical_failures,
+        phase_garbage_batches,
+        ancilla_garbage_batches,
+        avg_tof: sim.stats.toffoli_gates as f64 / denom,
+    }
+}
+
+fn exact_sweep(
+    prefix: &PrefixState,
+    curve: &WeierstrassEllipticCurve,
+    comb: &CombTable,
+    start: u64,
+    count: u64,
+    shots: usize,
+) {
+    let ops = crate::point_add::build();
+    let profile_sites = if tof_fire_profile_requested() {
+        let sites = crate::point_add::take_last_op_sites();
+        if sites.len() == ops.len() {
+            eprintln!(
+                "Toffoli fire profiler: captured {} source sites for {} ops",
+                sites.len(),
+                ops.len()
+            );
+            Some(sites)
+        } else {
+            eprintln!(
+                "Toffoli fire profiler: source site length mismatch sites={} ops={}; reporting op indices only",
+                sites.len(),
+                ops.len()
+            );
+            None
+        }
+    } else {
+        None
+    };
+    let (total_qubits, num_bits, _num_regs, regs) = analyze_ops(ops.iter());
+    assert_eq!(regs.len(), 4, "expected 4 registers, got {}", regs.len());
+    for (i, r) in regs.iter().enumerate() {
+        assert_eq!(r.len(), 256, "register {i} should be 256 wide");
+    }
+
+    let confirm_nonces = std::env::var("ISLAND_EXACT_CONFIRM").ok().map(|path| {
+        let text = std::fs::read_to_string(&path).expect("read ISLAND_EXACT_CONFIRM file");
+        let mut nonces: Vec<u64> = text
+            .lines()
+            .filter_map(|line| line.split_whitespace().last())
+            .filter_map(|tok| tok.parse::<u64>().ok())
+            .collect();
+        nonces.sort_unstable();
+        nonces.dedup();
+        nonces
+    });
+
+    eprintln!(
+        "exact sim ready: ops={} qubits={} bits={} shots={}{}",
+        ops.len(),
+        total_qubits,
+        num_bits,
+        shots,
+        if let Some(ref nonces) = confirm_nonces {
+            format!(" confirming {} listed nonces", nonces.len())
+        } else {
+            format!(" sweeping [{}, {})", start, start.saturating_add(count))
+        }
+    );
+
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    let requested_threads = env_usize(
+        "ISLAND_THREADS",
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1),
+    );
+    let threads = if tof_fire_profile_requested() {
+        if requested_threads != 1 {
+            eprintln!(
+                "Toffoli fire profiler: forcing ISLAND_THREADS=1 for deterministic profile output (requested {})",
+                requested_threads
+            );
+        }
+        1
+    } else {
+        requested_threads
+    };
+    let endx = start.saturating_add(count);
+    let next = AtomicU64::new(start);
+    let survivors: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+    let best: Mutex<(u64, usize)> = Mutex::new((start, 0));
+    let full = std::env::var("ISLAND_EXACT_FULL").is_ok();
+    let best_full: Mutex<Option<ExactReport>> = Mutex::new(None);
+
+    if let Some(nonces) = confirm_nonces {
+        let next_idx = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..threads.max(1) {
+                scope.spawn(|| loop {
+                    let idx = next_idx.fetch_add(1, Ordering::Relaxed);
+                    let Some(&nonce) = nonces.get(idx) else {
+                        break;
+                    };
+                    let r = exact_report(
+                        &ops,
+                        &regs,
+                        total_qubits,
+                        num_bits,
+                        prefix,
+                        curve,
+                        comb,
+                        profile_sites.as_deref(),
+                        nonce,
+                        shots,
+                    );
+                    println!(
+                        "EXACT nonce={} shots={} cls={} pha={} anc={} avg_tof={:.3}",
+                        r.nonce,
+                        r.shots,
+                        r.classical_failures,
+                        r.phase_garbage_batches,
+                        r.ancilla_garbage_batches,
+                        r.avg_tof,
+                    );
+                    {
+                        let mut b = best_full.lock().unwrap();
+                        let severity = r
+                            .classical_failures
+                            .max(r.phase_garbage_batches)
+                            .max(r.ancilla_garbage_batches);
+                        let replace = match *b {
+                            None => true,
+                            Some(prev) => {
+                                let prev_severity = prev
+                                    .classical_failures
+                                    .max(prev.phase_garbage_batches)
+                                    .max(prev.ancilla_garbage_batches);
+                                severity < prev_severity
+                                    || (severity == prev_severity
+                                        && r.classical_failures
+                                            + r.phase_garbage_batches
+                                            + r.ancilla_garbage_batches
+                                            < prev.classical_failures
+                                                + prev.phase_garbage_batches
+                                                + prev.ancilla_garbage_batches)
+                            }
+                        };
+                        if replace {
+                            *b = Some(r);
+                            eprintln!(
+                                "[best-full] nonce={} cls={} pha={} anc={} avg_tof={:.3}",
+                                r.nonce,
+                                r.classical_failures,
+                                r.phase_garbage_batches,
+                                r.ancilla_garbage_batches,
+                                r.avg_tof,
+                            );
+                        }
+                    }
+                    if r.classical_failures == 0
+                        && r.phase_garbage_batches == 0
+                        && r.ancilla_garbage_batches == 0
+                    {
+                        survivors.lock().unwrap().push(nonce);
+                        println!("EXACT_SURVIVOR {}", nonce);
+                    }
+                });
+            }
+        });
+        let mut survivors = survivors.into_inner().unwrap();
+        survivors.sort_unstable();
+        let best_full = best_full.into_inner().unwrap();
+        if let Some(r) = best_full {
+            eprintln!(
+                "best full: nonce={} cls={} pha={} anc={} avg_tof={:.3}",
+                r.nonce,
+                r.classical_failures,
+                r.phase_garbage_batches,
+                r.ancilla_garbage_batches,
+                r.avg_tof,
+            );
+        }
+        eprintln!(
+            "exact confirmed {} listed nonces on {} threads, {} survivors",
+            nonces.len(),
+            threads,
+            survivors.len(),
+        );
+        return;
+    }
+
+    std::thread::scope(|scope| {
+        for _ in 0..threads.max(1) {
+            scope.spawn(|| loop {
+                let nonce = next.fetch_add(1, Ordering::Relaxed);
+                if nonce >= endx {
+                    break;
+                }
+                if full {
+                    let r = exact_report(
+                        &ops,
+                        &regs,
+                        total_qubits,
+                        num_bits,
+                        prefix,
+                        curve,
+                        comb,
+                        profile_sites.as_deref(),
+                        nonce,
+                        shots,
+                    );
+                    println!(
+                        "EXACT nonce={} shots={} cls={} pha={} anc={} avg_tof={:.3}",
+                        r.nonce,
+                        r.shots,
+                        r.classical_failures,
+                        r.phase_garbage_batches,
+                        r.ancilla_garbage_batches,
+                        r.avg_tof,
+                    );
+                    {
+                        let mut b = best_full.lock().unwrap();
+                        let severity = r
+                            .classical_failures
+                            .max(r.phase_garbage_batches)
+                            .max(r.ancilla_garbage_batches);
+                        let replace = match *b {
+                            None => true,
+                            Some(prev) => {
+                                let prev_severity = prev
+                                    .classical_failures
+                                    .max(prev.phase_garbage_batches)
+                                    .max(prev.ancilla_garbage_batches);
+                                severity < prev_severity
+                                    || (severity == prev_severity
+                                        && r.classical_failures
+                                            + r.phase_garbage_batches
+                                            + r.ancilla_garbage_batches
+                                            < prev.classical_failures
+                                                + prev.phase_garbage_batches
+                                                + prev.ancilla_garbage_batches)
+                            }
+                        };
+                        if replace {
+                            *b = Some(r);
+                            eprintln!(
+                                "[best-full] nonce={} cls={} pha={} anc={} avg_tof={:.3}",
+                                r.nonce,
+                                r.classical_failures,
+                                r.phase_garbage_batches,
+                                r.ancilla_garbage_batches,
+                                r.avg_tof,
+                            );
+                        }
+                    }
+                    if r.classical_failures == 0
+                        && r.phase_garbage_batches == 0
+                        && r.ancilla_garbage_batches == 0
+                    {
+                        survivors.lock().unwrap().push(nonce);
+                        println!("EXACT_SURVIVOR {}", nonce);
+                    }
+                    continue;
+                }
+                let clean = exact_clean_prefix(
+                    &ops,
+                    &regs,
+                    total_qubits,
+                    num_bits,
+                    prefix,
+                    curve,
+                    comb,
+                    nonce,
+                    shots,
+                );
+                {
+                    let mut b = best.lock().unwrap();
+                    if clean > b.1 {
+                        *b = (nonce, clean);
+                        eprintln!("[best] nonce={} clean_prefix={}/{}", nonce, clean, shots);
+                    }
+                }
+                if clean >= shots {
+                    survivors.lock().unwrap().push(nonce);
+                    println!("EXACT_SURVIVOR {}", nonce);
+                }
+            });
+        }
+    });
+
+    let mut survivors = survivors.into_inner().unwrap();
+    survivors.sort_unstable();
+    let best = best.into_inner().unwrap();
+    let best_full = best_full.into_inner().unwrap();
+    if let Some(r) = best_full {
+        eprintln!(
+            "best full: nonce={} cls={} pha={} anc={} avg_tof={:.3}",
+            r.nonce,
+            r.classical_failures,
+            r.phase_garbage_batches,
+            r.ancilla_garbage_batches,
+            r.avg_tof,
+        );
+    }
+    eprintln!(
+        "exact swept {} nonces on {} threads, {} survivors; best nonce={} clean_prefix={}/{}",
+        count,
+        threads,
+        survivors.len(),
+        best.0,
+        best.1,
+        shots
+    );
+}
+
 fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 fn env_u64(key: &str, default: u64) -> u64 {
-    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 
 /// Env-driven sweep entry point (invoked from `examples/island_search.rs`).
@@ -439,6 +1376,9 @@ fn env_u64(key: &str, default: u64) -> u64 {
 ///   ISLAND_COUNT_ALL (count every hard shot instead of early-stop),
 ///   DIALOG_TAIL_NONCE (the base/frontier nonce, also the self-check nonce).
 pub fn run_from_env() {
+    if tof_fire_profile_requested() && std::env::var_os("TRACE_OP_SITES").is_none() {
+        std::env::set_var("TRACE_OP_SITES", "1");
+    }
     let base_nonce = env_u64("DIALOG_TAIL_NONCE", 18100027017098);
     let start = env_u64("ISLAND_NONCE_START", 0);
     let count = env_u64("ISLAND_NONCE_COUNT", 64);
@@ -451,7 +1391,8 @@ pub fn run_from_env() {
     let curve0 = secp256k1();
     let comb = CombTable::new(&curve0);
     // Parity self-check: comb must agree with curve.mul on random scalars.
-    {
+    // It is expensive enough that search runs keep it opt-in.
+    if std::env::var("ISLAND_COMB_PARITY").is_ok() {
         let mut x = U256::from(0x1234_5678_9abc_def0u64);
         for _ in 0..20000 {
             x = x
@@ -492,7 +1433,10 @@ pub fn run_from_env() {
             let e = curve.add(t.0, t.1, o.0, o.1);
             let (dx, c) = point_add_gcd_factors(t.0, o.0, e.0);
             let dy = sub_mod_p(t.1, o.1, p);
-            let lambda = dx.inv_mod(p).map(|i| dy.mul_mod(i, p)).unwrap_or(U256::ZERO);
+            let lambda = dx
+                .inv_mod(p)
+                .map(|i| dy.mul_mod(i, p))
+                .unwrap_or(U256::ZERO);
             let verdict = match check_point_add_apply_hazards(dx, dy, lambda, c, &cfg, &apply_cfg) {
                 Ok(_) => "OK".to_string(),
                 Err(e) => format!("{e:?}").replace(' ', ""),
@@ -562,7 +1506,11 @@ pub fn run_from_env() {
         }
         println!();
         // self-validate: absorb base nonce tail, finalize, squeeze 2 shots, print k1,k2
-        let mut sp2 = Sponge { st: sp.st, buf: sp.buf, buflen: sp.buflen };
+        let mut sp2 = Sponge {
+            st: sp.st,
+            buf: sp.buf,
+            buflen: sp.buflen,
+        };
         for i in 0..NONCE_BITS {
             let tb = if (base_nonce >> i) & 1 == 1 { &t1 } else { &t0 };
             sp2.absorb(tb);
@@ -595,6 +1543,10 @@ pub fn run_from_env() {
         }
         return;
     }
+    if std::env::var("ISLAND_EXACT_SIM").is_ok() {
+        exact_sweep(&prefix, &curve0, &comb, start, count, shots);
+        return;
+    }
     let cfg = DialogGcdFilterConfig::from_env();
     let apply_cfg = DialogApplyFilterConfig::from_env();
     // Export the per-step GCD schedule arrays + flags for the CUDA predicate.
@@ -610,9 +1562,13 @@ pub fn run_from_env() {
             cfg.skip_zero_edge_tobit_fwd_cshift as u8
         );
         let aw: Vec<usize> = (0..ai).map(|s| cfg.active_width(s)).collect();
-        let cb: Vec<usize> = (0..ai).map(|s| cfg.compare_bits_for_step(s, aw[s])).collect();
+        let cb: Vec<usize> = (0..ai)
+            .map(|s| cfg.compare_bits_for_step(s, aw[s]))
+            .collect();
         let csw: Vec<usize> = (0..ai).map(|s| cfg.cswap_width(aw[s], s)).collect();
-        let bw: Vec<usize> = (0..ai).map(|s| cfg.body_carry_trunc_width_fast(aw[s], s)).collect();
+        let bw: Vec<usize> = (0..ai)
+            .map(|s| cfg.body_carry_trunc_width_fast(aw[s], s))
+            .collect();
         let shw: Vec<usize> = (0..ai).map(|s| cfg.shift_width(aw[s], s)).collect();
         let pr = |name: &str, v: &[usize]| {
             print!("{name}");
@@ -638,18 +1594,30 @@ pub fn run_from_env() {
             .lines()
             .filter_map(|l| l.trim().parse::<u64>().ok())
             .collect();
-        eprintln!("confirming {} candidates with full predicate ({} shots)", cands.len(), shots);
+        eprintln!(
+            "confirming {} candidates with full predicate ({} shots)",
+            cands.len(),
+            shots
+        );
         use std::sync::atomic::{AtomicUsize, Ordering as O};
         use std::sync::Mutex;
         let idx = AtomicUsize::new(0);
         let clean: Mutex<Vec<u64>> = Mutex::new(Vec::new());
-        let nthreads = env_usize("ISLAND_THREADS", std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
+        let nthreads = env_usize(
+            "ISLAND_THREADS",
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
+        );
         std::thread::scope(|sc| {
             for _ in 0..nthreads.max(1) {
                 sc.spawn(|| loop {
                     let i = idx.fetch_add(1, O::Relaxed);
-                    if i >= cands.len() { break; }
-                    let r = screen_nonce(&prefix, &curve, &comb, &cfg, &apply_cfg, cands[i], shots, 0);
+                    if i >= cands.len() {
+                        break;
+                    }
+                    let r =
+                        screen_nonce(&prefix, &curve, &comb, &cfg, &apply_cfg, cands[i], shots, 0);
                     if r.hard == 0 {
                         clean.lock().unwrap().push(cands[i]);
                         println!("CONFIRMED {}", cands[i]);
@@ -659,25 +1627,47 @@ pub fn run_from_env() {
         });
         let mut c = clean.into_inner().unwrap();
         c.sort_unstable();
-        eprintln!("confirmed {} true survivors of {} candidates", c.len(), cands.len());
+        eprintln!(
+            "confirmed {} true survivors of {} candidates",
+            c.len(),
+            cands.len()
+        );
         return;
     }
     eprintln!(
         "prefix ready: op_count={} base_nonce={} shots={} sweeping [{}, {})",
-        prefix.op_count, base_nonce, shots, start, start + count
+        prefix.op_count,
+        base_nonce,
+        shots,
+        start,
+        start + count
     );
 
     // Soundness self-check: the base nonce is eval-clean (0/0/0), so it MUST be
     // a filter survivor (0 hard). A nonzero count means the prefilter is
     // over-strict (false rejects) and the search would miss real survivors.
-    let base = screen_nonce(&prefix, &curve, &comb, &cfg, &apply_cfg, base_nonce, shots, usize::MAX);
+    let base = screen_nonce(
+        &prefix,
+        &curve,
+        &comb,
+        &cfg,
+        &apply_cfg,
+        base_nonce,
+        shots,
+        usize::MAX,
+    );
     eprintln!(
         "[base] nonce={} shots={} hard={}  (expect hard=0)",
         base.nonce, base.shots, base.hard
     );
 
     let early = if full { usize::MAX } else { 0 };
-    let threads = env_usize("ISLAND_THREADS", std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
+    let threads = env_usize(
+        "ISLAND_THREADS",
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1),
+    );
     let near = env_usize("ISLAND_REPORT_NEAR", 0); // also log nonces with hard <= near
 
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -691,27 +1681,27 @@ pub fn run_from_env() {
 
     std::thread::scope(|scope| {
         for _ in 0..threads.max(1) {
-            scope.spawn(|| {
-                loop {
-                    let nonce = next.fetch_add(1, Ordering::Relaxed);
-                    if nonce >= endx {
-                        break;
+            scope.spawn(|| loop {
+                let nonce = next.fetch_add(1, Ordering::Relaxed);
+                if nonce >= endx {
+                    break;
+                }
+                let r = screen_nonce(
+                    &prefix, &curve, &comb, &cfg, &apply_cfg, nonce, shots, early,
+                );
+                if r.hard == 0 {
+                    survivors.lock().unwrap().push(r.nonce);
+                    eprintln!("[SURVIVOR] nonce={} shots={}", r.nonce, r.shots);
+                }
+                if full {
+                    tot_hard.fetch_add(r.hard as u64, Ordering::Relaxed);
+                    tot_shots.fetch_add(r.shots as u64, Ordering::Relaxed);
+                    let mut b = best.lock().unwrap();
+                    if r.hard < b.1 {
+                        *b = (r.nonce, r.hard);
                     }
-                    let r = screen_nonce(&prefix, &curve, &comb, &cfg, &apply_cfg, nonce, shots, early);
-                    if r.hard == 0 {
-                        survivors.lock().unwrap().push(r.nonce);
-                        eprintln!("[SURVIVOR] nonce={} shots={}", r.nonce, r.shots);
-                    }
-                    if full {
-                        tot_hard.fetch_add(r.hard as u64, Ordering::Relaxed);
-                        tot_shots.fetch_add(r.shots as u64, Ordering::Relaxed);
-                        let mut b = best.lock().unwrap();
-                        if r.hard < b.1 {
-                            *b = (r.nonce, r.hard);
-                        }
-                        if near > 0 && r.hard <= near {
-                            eprintln!("[near] nonce={} hard={}/{}", r.nonce, r.hard, r.shots);
-                        }
+                    if near > 0 && r.hard <= near {
+                        eprintln!("[near] nonce={} hard={}/{}", r.nonce, r.hard, r.shots);
                     }
                 }
             });
