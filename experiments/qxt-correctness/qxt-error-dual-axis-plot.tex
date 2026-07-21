@@ -1,0 +1,125 @@
+\documentclass[tikz,border=6pt]{standalone}
+
+\usepackage{pgfplots}
+\usepackage{pgfplotstable}
+\pgfplotsset{compat=1.18}
+
+\definecolor{scoreblue}{HTML}{0072B2}
+\definecolor{adjustedorange}{HTML}{D55E00}
+\definecolor{penaltyorange}{HTML}{E8A15B}
+\definecolor{gridgray}{HTML}{D9D9D9}
+
+\pgfplotstableread[col sep=comma]{qxt-history.csv}\historydata
+
+\begin{document}
+\begin{tikzpicture}
+  \begin{axis}[
+    name=scoreaxis,
+    scale only axis,
+    width=13.5cm,
+    height=7.8cm,
+    xmin=0,
+    xmax=410,
+    ymin=1.35,
+    ymax=11.25,
+    xtick={1,51,101,151,201,251,301,351,405},
+    xlabel={Accepted submission index},
+    ylabel={Score (billions)},
+    title={Circuit scores and empirical error rate on 50,000 fixed point pairs},
+    title style={font=\bfseries},
+    tick label style={font=\small},
+    label style={font=\small},
+    axis y line*=left,
+    axis x line*=bottom,
+    grid=both,
+    major grid style={draw=gridgray, line width=0.35pt},
+    minor grid style={draw=gridgray!55, line width=0.2pt},
+    minor x tick num=4,
+    minor y tick num=1,
+    axis line style={draw=black!70},
+    legend style={
+      at={(0.5,-0.18)},
+      anchor=north,
+      legend columns=3,
+      draw=black!25,
+      fill=white,
+      fill opacity=0.94,
+      text opacity=1,
+      font=\small,
+      cells={anchor=west},
+      /tikz/every even column/.append style={column sep=0.65cm}
+    },
+  ]
+    \addplot+[
+      scoreblue,
+      line width=1.25pt,
+      mark=*,
+      mark size=1.55pt,
+      mark options={solid, fill=white, line width=0.75pt},
+    ] table[
+      x=accepted_submission_index,
+      y expr={\thisrow{qxt}/1000000000},
+    ] {\historydata};
+    \addlegendentry{$Q\!\times\!T$}
+
+    \addplot+[
+      adjustedorange,
+      dashed,
+      dash pattern=on 4pt off 2.2pt,
+      line width=1.15pt,
+      mark=triangle*,
+      mark size=1.65pt,
+      mark options={solid, fill=adjustedorange, line width=0.6pt},
+    ] table[
+      x=accepted_submission_index,
+      y expr={\thisrow{qxt_over_p}/1000000000},
+    ] {\historydata};
+    \addlegendentry{$Q\!\times\!T/p$}
+
+    \addlegendimage{
+      penaltyorange,
+      opacity=0.58,
+      densely dotted,
+      line width=1.15pt,
+      mark=diamond*,
+      mark size=1.55pt,
+      mark options={solid, fill=penaltyorange}
+    }
+    \addlegendentry{Error rate $100(1-p)$}
+  \end{axis}
+
+  \begin{axis}[
+    at={(scoreaxis.south west)},
+    anchor=south west,
+    scale only axis,
+    width=13.5cm,
+    height=7.8cm,
+    xmin=0,
+    xmax=410,
+    ymin=0,
+    ymax=0.18,
+    ytick={0,0.05,0.10,0.15},
+    yticklabels={0,0.05,0.10,0.15},
+    ylabel={Classical error rate (\%)},
+    tick label style={font=\small, text=penaltyorange!80!black},
+    label style={font=\small, text=penaltyorange!80!black},
+    axis y line*=right,
+    axis x line=none,
+    axis line style={draw=penaltyorange!75!black},
+    xtick=\empty,
+  ]
+    \addplot+[
+      penaltyorange,
+      opacity=0.58,
+      densely dotted,
+      line width=1.15pt,
+      mark=diamond*,
+      mark size=1.55pt,
+      mark options={solid, fill=penaltyorange, line width=0.5pt},
+    ] table[
+      x=accepted_submission_index,
+      y expr={100*(1-\thisrow{correctness_probability})},
+    ] {\historydata};
+  \end{axis}
+\end{tikzpicture}
+\end{document}

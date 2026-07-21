@@ -1,0 +1,483 @@
+\documentclass[tikz,border=6pt]{standalone}
+
+\usepackage{pgfplots}
+\usepackage{pgfplotstable}
+\usetikzlibrary{calc}
+\pgfplotsset{compat=1.18}
+
+\definecolor{uncorrectedblue}{HTML}{0072B2}
+\definecolor{correctedorange}{HTML}{D55E00}
+\definecolor{errororange}{HTML}{E8A15B}
+\definecolor{gridgray}{HTML}{D9D9D9}
+
+\pgfplotstableread[col sep=comma]{qxt-history.csv}\historydata
+
+% Q' = Q + 16, T' = T + 3*2^16, and e = 1-p.
+% The two left-axis series are Q'*T'*28 and Q'*T'*28/(1-28e).
+\begin{document}
+\begin{tikzpicture}
+  \begin{axis}[
+    name=scoreaxis,
+    scale only axis,
+    width=13.5cm,
+    height=7.8cm,
+    xmin=0,
+    xmax=410,
+    ymin=40,
+    ymax=330,
+    xtick={1,51,101,151,201,251,301,351,405},
+    ytick={50,100,150,200,250,300},
+    xlabel={Accepted submission index},
+    ylabel={Estimated circuit score (billions)},
+    title={Estimated full Shor circuit cost for 28 point additions},
+    title style={font=\bfseries},
+    tick label style={font=\small},
+    label style={font=\small},
+    axis y line*=left,
+    axis x line*=bottom,
+    grid=both,
+    major grid style={draw=gridgray, line width=0.35pt},
+    minor grid style={draw=gridgray!55, line width=0.2pt},
+    minor x tick num=4,
+    minor y tick num=1,
+    axis line style={draw=black!70},
+    legend style={
+      at={(0.5,-0.18)},
+      anchor=north,
+      legend columns=3,
+      draw=black!25,
+      fill=white,
+      fill opacity=0.94,
+      text opacity=1,
+      font=\small,
+      cells={anchor=west},
+      /tikz/every even column/.append style={column sep=0.55cm}
+    },
+  ]
+    \addplot+[
+      uncorrectedblue,
+      line width=1.25pt,
+      mark=*,
+      mark size=1.55pt,
+      mark options={solid, fill=white, line width=0.75pt},
+    ] table[
+      x=accepted_submission_index,
+      y expr={
+        (\thisrow{peak_qubits}+16)
+        *(\thisrow{avg_executed_toffoli}+3*2^16)
+        *28/1000000000
+      },
+    ] {\historydata};
+    \addlegendentry{Error uncorrected}
+
+    \addplot+[
+      correctedorange,
+      dashed,
+      dash pattern=on 4pt off 2.2pt,
+      line width=1.15pt,
+      mark=triangle*,
+      mark size=1.65pt,
+      mark options={solid, fill=correctedorange, line width=0.6pt},
+    ] table[
+      x=accepted_submission_index,
+      y expr={
+        (\thisrow{peak_qubits}+16)
+        *(\thisrow{avg_executed_toffoli}+3*2^16)
+        *28/1000000000
+        /(1-28*(1-\thisrow{correctness_probability}))
+      },
+    ] {\historydata};
+    \addlegendentry{Error corrected}
+
+    \addlegendimage{
+      errororange,
+      opacity=0.58,
+      densely dotted,
+      line width=1.15pt,
+      mark=diamond*,
+      mark size=1.55pt,
+      mark options={solid, fill=errororange}
+    }
+    \addlegendentry{Amplified error $28e$}
+
+    \coordinate (zoomsourceA) at (axis cs:226,65.4);
+    \coordinate (zoomsourceB) at (axis cs:276,62.1);
+    \coordinate (zoomsourceC) at (axis cs:396,52.2);
+  \end{axis}
+
+  \begin{axis}[
+    at={(scoreaxis.south west)},
+    anchor=south west,
+    scale only axis,
+    width=13.5cm,
+    height=7.8cm,
+    xmin=0,
+    xmax=410,
+    ymin=0,
+    ymax=5,
+    ytick={0,1,2,3,4,5},
+    ylabel={Amplified error $28e$ (\%)},
+    tick label style={font=\small, text=errororange!80!black},
+    label style={font=\small, text=errororange!80!black},
+    axis y line*=right,
+    axis x line=none,
+    axis line style={draw=errororange!75!black},
+    xtick=\empty,
+  ]
+    \addplot+[
+      errororange,
+      opacity=0.58,
+      densely dotted,
+      line width=1.15pt,
+      mark=diamond*,
+      mark size=1.55pt,
+      mark options={solid, fill=errororange, line width=0.5pt},
+    ] table[
+      x=accepted_submission_index,
+      y expr={100*28*(1-\thisrow{correctness_probability})},
+    ] {\historydata};
+  \end{axis}
+
+  % Circular magnifier for the clearest adjacent-commit reversal: from
+  % submission 221 to 231, the uncorrected score falls while the
+  % error-corrected score rises.
+  \coordinate (zoomcenterA) at ($(scoreaxis.south west)+(4.00cm,6.35cm)$);
+
+  % Callout and connector, drawn beneath the magnified data.
+  \draw[
+    black!35,
+    line width=0.55pt,
+  ] ($(zoomsourceA)+(-0.23cm,0.12cm)$)
+    -- ($(zoomcenterA)+(0.65cm,-1.12cm)$);
+  \draw[
+    black!35,
+    line width=0.55pt,
+  ] ($(zoomsourceA)+(0.23cm,0.12cm)$)
+    -- ($(zoomcenterA)+(1.04cm,-0.78cm)$);
+  \draw[
+    fill=white,
+    fill opacity=0.40,
+    draw=black!55,
+    line width=0.75pt,
+  ] (zoomsourceA) ellipse[x radius=0.26cm,y radius=0.17cm];
+
+  % A small offset circle supplies a restrained drop shadow.
+  \fill[black,opacity=0.13]
+    ($(zoomcenterA)+(0.06cm,-0.06cm)$) circle[radius=1.30cm];
+  \fill[white] (zoomcenterA) circle[radius=1.30cm];
+
+  \begin{scope}
+    \clip (zoomcenterA) circle[radius=1.27cm];
+    \begin{axis}[
+      at={($(zoomcenterA)+(0.06cm,0)$)},
+      anchor=center,
+      scale only axis,
+      width=1.72cm,
+      height=1.50cm,
+      xmin=217,
+      xmax=235,
+      ymin=64.2,
+      ymax=66.55,
+      xtick={221,231},
+      ytick={64.5,65.5,66.5},
+      xticklabel style={font=\tiny\bfseries},
+      yticklabel style={
+        font=\tiny,
+        xshift=8pt,
+        fill=white,
+        inner sep=0.5pt,
+      },
+      axis line style={draw=black!45,line width=0.4pt},
+      grid=both,
+      major grid style={draw=gridgray,line width=0.3pt},
+      minor grid style={draw=gridgray!60,line width=0.2pt},
+      minor x tick num=1,
+      minor y tick num=1,
+      axis background/.style={fill=white},
+      clip mode=individual,
+    ]
+      \addplot+[
+        uncorrectedblue,
+        line width=1.15pt,
+        mark=*,
+        mark size=1.75pt,
+        mark options={solid,fill=white,line width=0.85pt},
+        restrict x to domain=217:235,
+      ] table[
+        x=accepted_submission_index,
+        y expr={
+          (\thisrow{peak_qubits}+16)
+          *(\thisrow{avg_executed_toffoli}+3*2^16)
+          *28/1000000000
+        },
+      ] {\historydata};
+
+      \addplot+[
+        correctedorange,
+        dashed,
+        dash pattern=on 4pt off 2.2pt,
+        line width=1.15pt,
+        mark=triangle*,
+        mark size=1.90pt,
+        mark options={solid,fill=correctedorange,line width=0.65pt},
+        restrict x to domain=217:235,
+      ] table[
+        x=accepted_submission_index,
+        y expr={
+          (\thisrow{peak_qubits}+16)
+          *(\thisrow{avg_executed_toffoli}+3*2^16)
+          *28/1000000000
+          /(1-28*(1-\thisrow{correctness_probability}))
+        },
+      ] {\historydata};
+
+      \node[
+        font=\tiny\bfseries,
+        text=uncorrectedblue,
+        fill=white,
+        inner sep=1.2pt,
+      ] at (axis cs:226,65.15) {$-0.507$ B};
+
+      \node[
+        font=\tiny\bfseries,
+        text=correctedorange,
+        fill=white,
+        inner sep=1.2pt,
+      ] at (axis cs:226,65.68) {$+0.427$ B};
+    \end{axis}
+  \end{scope}
+
+  \draw[black!65,line width=0.9pt]
+    (zoomcenterA) circle[radius=1.30cm];
+  \node[
+    font=\tiny\bfseries,
+    fill=white,
+    draw=black!25,
+    rounded corners=1.5pt,
+    inner xsep=4pt,
+    inner ysep=2pt,
+  ] at ($(zoomcenterA)+(0,1.19cm)$) {Zoom: 221--231};
+
+  % Second reversal: submissions 271 to 281.
+  \coordinate (zoomcenterB) at ($(scoreaxis.south west)+(7.05cm,6.35cm)$);
+  \draw[black!35,line width=0.55pt]
+    ($(zoomsourceB)+(-0.23cm,0.12cm)$)
+    -- ($(zoomcenterB)+(0.65cm,-1.12cm)$);
+  \draw[black!35,line width=0.55pt]
+    ($(zoomsourceB)+(0.23cm,0.12cm)$)
+    -- ($(zoomcenterB)+(1.04cm,-0.78cm)$);
+  \draw[
+    fill=white,
+    fill opacity=0.40,
+    draw=black!55,
+    line width=0.75pt,
+  ] (zoomsourceB) ellipse[x radius=0.26cm,y radius=0.17cm];
+
+  \fill[black,opacity=0.13]
+    ($(zoomcenterB)+(0.06cm,-0.06cm)$) circle[radius=1.30cm];
+  \fill[white] (zoomcenterB) circle[radius=1.30cm];
+
+  \begin{scope}
+    \clip (zoomcenterB) circle[radius=1.27cm];
+    \begin{axis}[
+      at={($(zoomcenterB)+(0.06cm,0)$)},
+      anchor=center,
+      scale only axis,
+      width=1.72cm,
+      height=1.50cm,
+      xmin=267,
+      xmax=285,
+      ymin=60.55,
+      ymax=63.65,
+      xtick={271,281},
+      ytick={61,62,63},
+      xticklabel style={font=\tiny\bfseries},
+      yticklabel style={
+        font=\tiny,
+        xshift=8pt,
+        fill=white,
+        inner sep=0.5pt,
+      },
+      axis line style={draw=black!45,line width=0.4pt},
+      grid=both,
+      major grid style={draw=gridgray,line width=0.3pt},
+      minor grid style={draw=gridgray!60,line width=0.2pt},
+      minor x tick num=1,
+      minor y tick num=1,
+      axis background/.style={fill=white},
+      clip mode=individual,
+    ]
+      \addplot+[
+        uncorrectedblue,
+        line width=1.15pt,
+        mark=*,
+        mark size=1.75pt,
+        mark options={solid,fill=white,line width=0.85pt},
+        restrict x to domain=267:285,
+      ] table[
+        x=accepted_submission_index,
+        y expr={
+          (\thisrow{peak_qubits}+16)
+          *(\thisrow{avg_executed_toffoli}+3*2^16)
+          *28/1000000000
+        },
+      ] {\historydata};
+
+      \addplot+[
+        correctedorange,
+        dashed,
+        dash pattern=on 4pt off 2.2pt,
+        line width=1.15pt,
+        mark=triangle*,
+        mark size=1.90pt,
+        mark options={solid,fill=correctedorange,line width=0.65pt},
+        restrict x to domain=267:285,
+      ] table[
+        x=accepted_submission_index,
+        y expr={
+          (\thisrow{peak_qubits}+16)
+          *(\thisrow{avg_executed_toffoli}+3*2^16)
+          *28/1000000000
+          /(1-28*(1-\thisrow{correctness_probability}))
+        },
+      ] {\historydata};
+
+      \node[
+        font=\tiny\bfseries,
+        text=uncorrectedblue,
+        fill=white,
+        inner sep=1.0pt,
+      ] at (axis cs:276,61.65) {$-0.626$ B};
+
+      \node[
+        font=\tiny\bfseries,
+        text=correctedorange,
+        fill=white,
+        inner sep=1.0pt,
+      ] at (axis cs:276,62.58) {$+0.087$ B};
+    \end{axis}
+  \end{scope}
+
+  \draw[black!65,line width=0.9pt]
+    (zoomcenterB) circle[radius=1.30cm];
+  \node[
+    font=\tiny\bfseries,
+    fill=white,
+    draw=black!25,
+    rounded corners=1.5pt,
+    inner xsep=4pt,
+    inner ysep=2pt,
+  ] at ($(zoomcenterB)+(0,1.19cm)$) {Zoom: 271--281};
+
+  % Third reversal: submissions 391 to 401.
+  \coordinate (zoomcenterC) at ($(scoreaxis.south west)+(9.65cm,2.00cm)$);
+  \draw[black!35,line width=0.55pt]
+    ($(zoomsourceC)+(-0.23cm,0.12cm)$)
+    -- ($(zoomcenterC)+(0.60cm,-1.07cm)$);
+  \draw[black!35,line width=0.55pt]
+    ($(zoomsourceC)+(0.23cm,0.12cm)$)
+    -- ($(zoomcenterC)+(1.00cm,-0.73cm)$);
+  \draw[
+    fill=white,
+    fill opacity=0.40,
+    draw=black!55,
+    line width=0.75pt,
+  ] (zoomsourceC) ellipse[x radius=0.26cm,y radius=0.17cm];
+
+  \fill[black,opacity=0.13]
+    ($(zoomcenterC)+(0.06cm,-0.06cm)$) circle[radius=1.25cm];
+  \fill[white] (zoomcenterC) circle[radius=1.25cm];
+
+  \begin{scope}
+    \clip (zoomcenterC) circle[radius=1.22cm];
+    \begin{axis}[
+      at={($(zoomcenterC)+(0.06cm,0)$)},
+      anchor=center,
+      scale only axis,
+      width=1.65cm,
+      height=1.45cm,
+      xmin=387,
+      xmax=403,
+      ymin=50.75,
+      ymax=53.75,
+      xtick={391,401},
+      ytick={51,52,53},
+      xticklabel style={font=\tiny\bfseries},
+      yticklabel style={
+        font=\tiny,
+        xshift=8pt,
+        fill=white,
+        inner sep=0.5pt,
+      },
+      axis line style={draw=black!45,line width=0.4pt},
+      grid=both,
+      major grid style={draw=gridgray,line width=0.3pt},
+      minor grid style={draw=gridgray!60,line width=0.2pt},
+      minor x tick num=1,
+      minor y tick num=1,
+      axis background/.style={fill=white},
+      clip mode=individual,
+    ]
+      \addplot+[
+        uncorrectedblue,
+        line width=1.15pt,
+        mark=*,
+        mark size=1.75pt,
+        mark options={solid,fill=white,line width=0.85pt},
+        restrict x to domain=387:403,
+      ] table[
+        x=accepted_submission_index,
+        y expr={
+          (\thisrow{peak_qubits}+16)
+          *(\thisrow{avg_executed_toffoli}+3*2^16)
+          *28/1000000000
+        },
+      ] {\historydata};
+
+      \addplot+[
+        correctedorange,
+        dashed,
+        dash pattern=on 4pt off 2.2pt,
+        line width=1.15pt,
+        mark=triangle*,
+        mark size=1.90pt,
+        mark options={solid,fill=correctedorange,line width=0.65pt},
+        restrict x to domain=387:403,
+      ] table[
+        x=accepted_submission_index,
+        y expr={
+          (\thisrow{peak_qubits}+16)
+          *(\thisrow{avg_executed_toffoli}+3*2^16)
+          *28/1000000000
+          /(1-28*(1-\thisrow{correctness_probability}))
+        },
+      ] {\historydata};
+
+      \node[
+        font=\tiny\bfseries,
+        text=uncorrectedblue,
+        fill=white,
+        inner sep=1.0pt,
+      ] at (axis cs:396,51.75) {$-0.351$ B};
+
+      \node[
+        font=\tiny\bfseries,
+        text=correctedorange,
+        fill=white,
+        inner sep=1.0pt,
+      ] at (axis cs:396,52.60) {$+0.195$ B};
+    \end{axis}
+  \end{scope}
+
+  \draw[black!65,line width=0.9pt]
+    (zoomcenterC) circle[radius=1.25cm];
+  \node[
+    font=\tiny\bfseries,
+    fill=white,
+    draw=black!25,
+    rounded corners=1.5pt,
+    inner xsep=4pt,
+    inner ysep=2pt,
+  ] at ($(zoomcenterC)+(0,1.14cm)$) {Zoom: 391--401};
+\end{tikzpicture}
+\end{document}

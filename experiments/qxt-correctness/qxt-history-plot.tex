@@ -1,0 +1,115 @@
+\documentclass[tikz,border=6pt]{standalone}
+
+\usepackage{pgfplots}
+\usepackage{pgfplotstable}
+\usetikzlibrary{positioning}
+\pgfplotsset{compat=1.18}
+
+\definecolor{rawblue}{HTML}{0072B2}
+\definecolor{adjustedorange}{HTML}{D55E00}
+\definecolor{gridgray}{HTML}{D9D9D9}
+
+\pgfplotstableread[col sep=comma]{qxt-history.csv}\historydata
+
+\begin{document}
+\begin{tikzpicture}
+  \begin{axis}[
+    name=main,
+    width=15.2cm,
+    height=9.2cm,
+    xmin=0,
+    xmax=410,
+    ymin=1.35,
+    ymax=11.25,
+    xtick={1,51,101,151,201,251,301,351,405},
+    xlabel={Accepted submission index},
+    ylabel={Score (billions)},
+    title={Historical circuit score on 50,000 fixed point pairs},
+    title style={font=\bfseries},
+    tick label style={font=\small},
+    label style={font=\small},
+    grid=both,
+    major grid style={draw=gridgray, line width=0.35pt},
+    minor grid style={draw=gridgray!55, line width=0.2pt},
+    minor x tick num=4,
+    minor y tick num=1,
+    axis line style={draw=black!70},
+    legend style={
+      at={(0.025,0.055)},
+      anchor=south west,
+      draw=black!25,
+      fill=white,
+      fill opacity=0.94,
+      text opacity=1,
+      font=\small,
+      cells={anchor=west}
+    },
+  ]
+    \addplot+[
+      rawblue,
+      line width=1.15pt,
+      mark=*,
+      mark size=1.45pt,
+      mark options={solid, fill=white, line width=0.75pt},
+    ] table[
+      x=accepted_submission_index,
+      y expr={\thisrow{qxt}/1000000000},
+    ] {\historydata};
+    \addlegendentry{$Q\!\times\!T$}
+
+    \addplot+[
+      adjustedorange,
+      dashed,
+      dash pattern=on 4pt off 2.2pt,
+      line width=1.15pt,
+      mark=triangle*,
+      mark size=1.65pt,
+      mark options={solid, fill=adjustedorange, line width=0.6pt},
+    ] table[
+      x=accepted_submission_index,
+      y expr={\thisrow{qxt_over_p}/1000000000},
+    ] {\historydata};
+    \addlegendentry{$Q\!\times\!T/p$}
+
+  \end{axis}
+
+  % The two requested score series are close at this scale. This inset makes
+  % their relative separation visible without changing the main y-axis.
+  \begin{axis}[
+    at={(main.north east)},
+    anchor=north east,
+    xshift=-0.45cm,
+    yshift=-0.55cm,
+    width=6.15cm,
+    height=3.75cm,
+    xmin=0,
+    xmax=410,
+    ymin=0,
+    ymax=0.18,
+    xtick={1,201,405},
+    ytick={0,0.05,0.10,0.15},
+    yticklabels={0,0.05,0.10,0.15},
+    xlabel={Submission index},
+    ylabel={Increase (\%)},
+    title={Penalty from imperfect correctness},
+    title style={font=\scriptsize\bfseries, yshift=-1pt},
+    tick label style={font=\scriptsize},
+    label style={font=\scriptsize},
+    grid=major,
+    major grid style={draw=gridgray, line width=0.3pt},
+    axis background/.style={fill=white},
+    axis line style={draw=black!55},
+  ]
+    \addplot+[
+      adjustedorange,
+      line width=0.9pt,
+      mark=triangle*,
+      mark size=1.25pt,
+      mark options={solid, fill=adjustedorange},
+    ] table[
+      x=accepted_submission_index,
+      y expr={100*(\thisrow{qxt_over_p}/\thisrow{qxt}-1)},
+    ] {\historydata};
+  \end{axis}
+\end{tikzpicture}
+\end{document}

@@ -1,0 +1,13 @@
+Figure~\ref{fig:qxt-shor-comparison} connects the resource score measured for
+one elliptic-curve point addition with its estimated effect on the complete
+28-addition Shor circuit. At the point-addition level, $Q\!\times\!T$ and
+$Q\!\times\!T/p$ remain close because the observed error probabilities are
+small. Nevertheless, the linearized full-circuit model amplifies the
+per-addition error to $28e$, which reaches $4.704\%$ in the sampled history and
+creates a more visible separation between the raw and correctness-adjusted
+costs. The overall resource trend improves substantially, but the transitions
+221--231, 271--281, and 391--401 illustrate that a lower raw cost does not
+always imply a lower corrected cost: in each case, the resource reduction is
+outweighed by the increased error penalty. These reversals motivate reporting
+both metrics, since optimizing qubits and Toffoli gates alone can conceal a
+regression in end-to-end reliability.
