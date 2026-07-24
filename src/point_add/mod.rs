@@ -31,6 +31,11 @@ thread_local! {
     static OP_SITE_TRACE: std::cell::RefCell<Vec<OpSite>> =
         std::cell::RefCell::new(Vec::new());
     static OP_TRACE_CONTEXT: std::cell::Cell<u32> = std::cell::Cell::new(0);
+    static RESOURCE_PHASE_TRACE: std::cell::RefCell<Vec<u8>> =
+        std::cell::RefCell::new(Vec::new());
+    static LAST_RESOURCE_CONSTRUCTION_TRACE:
+        std::cell::RefCell<Option<ResourceConstructionTrace>> =
+        std::cell::RefCell::new(None);
 }
 
 fn d1_phase_corrected_product_core_active() -> bool {
@@ -38,6 +43,133 @@ fn d1_phase_corrected_product_core_active() -> bool {
 }
 
 pub type OpSite = (&'static str, u32, u32);
+
+pub const RESOURCE_PHASE_COORD_SUB: u8 = 1;
+pub const RESOURCE_PHASE_INVERSE: u8 = 2;
+pub const RESOURCE_PHASE_ADD3X: u8 = 3;
+pub const RESOURCE_PHASE_SQUARE: u8 = 4;
+pub const RESOURCE_PHASE_MULTIPLY: u8 = 5;
+pub const RESOURCE_PHASE_FINAL_COORDS: u8 = 6;
+pub const RESOURCE_PHASE_COUNT: usize = 6;
+
+pub const RESOURCE_PHASE_NAMES: [&str; RESOURCE_PHASE_COUNT + 1] = [
+    "outside_profile",
+    "tlm_coord_x_sub+tlm_coord_y_sub",
+    "tlm_inverse",
+    "tlm_coord_add3x",
+    "tlm_square",
+    "tlm_forward_multiply",
+    "tlm_coord_y_sub_final+tlm_coord_rsub_final",
+];
+
+#[derive(Clone, Debug)]
+pub struct ResourceConstructionTrace {
+    pub active_timeline: Vec<(usize, u32)>,
+    pub source_phase_transitions: Vec<(usize, u8)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CircuitResourceTrace {
+    pub final_op_phases: Vec<u8>,
+    pub active_timeline: Vec<(usize, u32)>,
+    pub source_phase_transitions: Vec<(usize, u8)>,
+}
+
+pub(crate) fn resource_profile_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("PROFILE_CIRCUIT_RESOURCES").is_some())
+}
+
+fn reset_resource_profile_trace() {
+    if resource_profile_enabled() {
+        RESOURCE_PHASE_TRACE.with(|trace| trace.borrow_mut().clear());
+        LAST_RESOURCE_CONSTRUCTION_TRACE.with(|trace| *trace.borrow_mut() = None);
+    }
+}
+
+fn record_resource_phase(phase: u8) {
+    if resource_profile_enabled() {
+        RESOURCE_PHASE_TRACE.with(|trace| trace.borrow_mut().push(phase));
+    }
+}
+
+pub(crate) fn take_resource_phase_trace_for_transform(expected_len: usize) -> Option<Vec<u8>> {
+    if !resource_profile_enabled() {
+        return None;
+    }
+    RESOURCE_PHASE_TRACE.with(|trace| {
+        let mut trace = trace.borrow_mut();
+        assert_eq!(
+            trace.len(),
+            expected_len,
+            "resource phase trace length before transform"
+        );
+        Some(std::mem::take(&mut *trace))
+    })
+}
+
+pub(crate) fn set_resource_phase_trace_after_transform(phases: Vec<u8>) {
+    if resource_profile_enabled() {
+        RESOURCE_PHASE_TRACE.with(|trace| *trace.borrow_mut() = phases);
+    }
+}
+
+pub(crate) fn filter_resource_phase_trace(kill: &[bool]) {
+    let Some(phases) = take_resource_phase_trace_for_transform(kill.len()) else {
+        return;
+    };
+    let filtered = phases
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, phase)| (!kill[index]).then_some(phase))
+        .collect();
+    set_resource_phase_trace_after_transform(filtered);
+}
+
+pub(crate) fn rewrite_resource_phase_trace_for_fanout(
+    first_index: usize,
+    blocker_index: usize,
+    second_index: usize,
+    old_len: usize,
+) {
+    let Some(phases) = take_resource_phase_trace_for_transform(old_len) else {
+        return;
+    };
+    let replacement_phase = phases[first_index];
+    let mut rewritten = Vec::with_capacity(old_len - 1);
+    for (index, phase) in phases.into_iter().enumerate() {
+        if index == first_index || index == second_index {
+            continue;
+        }
+        rewritten.push(phase);
+        if index == blocker_index {
+            rewritten.push(replacement_phase);
+        }
+    }
+    assert_eq!(rewritten.len(), old_len - 1);
+    set_resource_phase_trace_after_transform(rewritten);
+}
+
+pub fn take_last_resource_trace() -> Option<CircuitResourceTrace> {
+    if !resource_profile_enabled() {
+        return None;
+    }
+    let final_op_phases =
+        RESOURCE_PHASE_TRACE.with(|trace| std::mem::take(&mut *trace.borrow_mut()));
+    let construction = LAST_RESOURCE_CONSTRUCTION_TRACE
+        .with(|trace| trace.borrow_mut().take())?;
+    Some(CircuitResourceTrace {
+        final_op_phases,
+        active_timeline: construction.active_timeline,
+        source_phase_transitions: construction.source_phase_transitions,
+    })
+}
+
+pub(crate) fn store_resource_construction_trace(trace: ResourceConstructionTrace) {
+    if resource_profile_enabled() {
+        LAST_RESOURCE_CONSTRUCTION_TRACE.with(|slot| *slot.borrow_mut() = Some(trace));
+    }
+}
 
 pub(crate) fn op_site_trace_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -123,6 +255,8 @@ pub struct B {
 
     pub phase_transitions: Vec<(usize, &'static str)>,
     pub active_timeline: Vec<(usize, u32)>,
+    pub resource_phase: u8,
+    pub resource_phase_transitions: Vec<(usize, u8)>,
 
     pub k2_shift2_log: Vec<QubitId>,
 
@@ -173,6 +307,7 @@ pub struct PhaseResource {
 impl B {
     fn new() -> Self {
         reset_op_site_trace();
+        reset_resource_profile_trace();
         Self {
             ops: Vec::new(),
             count_only: false,
@@ -197,6 +332,8 @@ impl B {
             current_phase_active_max: 0,
             phase_transitions: Vec::new(),
             active_timeline: Vec::new(),
+            resource_phase: 0,
+            resource_phase_transitions: Vec::new(),
             k2_shift2_log: Vec::new(),
             b0: {
                 let lo = std::env::var("B0_WIN_LO")
@@ -236,6 +373,7 @@ impl B {
         self.counted_kind_ops[op.kind as usize] += 1;
         self.counted_phase_kind_ops[op.kind as usize] += 1;
         if !self.count_only {
+            record_resource_phase(self.resource_phase);
             let loc = std::panic::Location::caller();
             let context = OP_TRACE_CONTEXT.with(|slot| slot.get());
             record_op_site((loc.file(), loc.line(), context));
@@ -314,8 +452,18 @@ impl B {
         }
         self.phase_transitions.push((self.current_ops_len(), p));
     }
+    fn set_resource_phase(&mut self, phase: u8) {
+        if self.resource_phase == phase {
+            return;
+        }
+        self.resource_phase = phase;
+        if resource_profile_enabled() {
+            self.resource_phase_transitions
+                .push((self.current_ops_len(), phase));
+        }
+    }
     fn record_active_timeline(&mut self) {
-        if std::env::var("PROFILE_ACTIVE_TIMELINE").is_ok() {
+        if resource_profile_enabled() || std::env::var("PROFILE_ACTIVE_TIMELINE").is_ok() {
             self.active_timeline
                 .push((self.current_ops_len(), self.active_qubits));
         }

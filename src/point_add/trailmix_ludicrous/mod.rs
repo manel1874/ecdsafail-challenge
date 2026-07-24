@@ -367,6 +367,7 @@ pub fn build_trailmix_ludicrous_ops() -> Vec<Op> {
     let x2_init = x2.clone();
     let mut x2m = x2;
     ec_add::ec_add(&mut circ, &mut x2m, &y2, &ox, &oy);
+    circ.set_resource_phase(0);
 
     circ.declare_qubit_register(&x2_init);
     circ.declare_qubit_register(&y2);
@@ -389,6 +390,13 @@ pub fn build_trailmix_ludicrous_ops() -> Vec<Op> {
     }
 
     circ.b0_finalize();
+
+    crate::point_add::store_resource_construction_trace(
+        crate::point_add::ResourceConstructionTrace {
+            active_timeline: circ.active_timeline.clone(),
+            source_phase_transitions: circ.resource_phase_transitions.clone(),
+        },
+    );
 
     if std::env::var("TRACE_TLM_PROFILE").is_ok() {
         circ.close_phase_active_region();

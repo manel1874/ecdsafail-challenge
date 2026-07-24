@@ -254,6 +254,12 @@ pub(crate) fn rewrite_first_target_fanout(
                     if rewritten[rewritten.len() - protected_tail_ops..] != protected_tail {
                         return Err("single-fanout rewrite changed the nonce suffix".to_owned());
                     }
+                    crate::point_add::rewrite_resource_phase_trace_for_fanout(
+                        prior.index,
+                        blocker_index,
+                        index,
+                        prefix_len + protected_tail_ops,
+                    );
                     return Ok((rewritten, witness));
                 }
             }

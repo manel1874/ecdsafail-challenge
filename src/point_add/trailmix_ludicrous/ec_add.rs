@@ -284,25 +284,31 @@ pub fn ec_add(
     assert_eq!(ox.len(), N, "ox is 256 classical bits");
     assert_eq!(oy.len(), N, "oy is 256 classical bits");
 
+    circ.set_resource_phase(crate::point_add::RESOURCE_PHASE_COORD_SUB);
     circ.set_phase("tlm_coord_x_sub");
     coord_addsub(circ, x2, ox, true);
     circ.set_phase("tlm_coord_y_sub");
     coord_addsub(circ, &y2[..N], oy, true);
 
+    circ.set_resource_phase(crate::point_add::RESOURCE_PHASE_INVERSE);
     circ.set_phase("tlm_inverse");
     let xv = std::mem::take(x2);
     *x2 = mod_mul_inverse_in_place(circ, xv, y2, Direction::Inverse);
 
+    circ.set_resource_phase(crate::point_add::RESOURCE_PHASE_ADD3X);
     circ.set_phase("tlm_coord_add3x");
     coord_add3x(circ, x2, ox);
 
+    circ.set_resource_phase(crate::point_add::RESOURCE_PHASE_SQUARE);
     circ.set_phase("tlm_square");
     mod_square_sub_pm_secp256k1_symmetric(circ, &y2[..N], x2);
 
+    circ.set_resource_phase(crate::point_add::RESOURCE_PHASE_MULTIPLY);
     circ.set_phase("tlm_forward_multiply");
     let xv = std::mem::take(x2);
     *x2 = mod_mul_inverse_in_place(circ, xv, y2, Direction::Forward);
 
+    circ.set_resource_phase(crate::point_add::RESOURCE_PHASE_FINAL_COORDS);
     circ.set_phase("tlm_coord_y_sub_final");
     coord_addsub(circ, &y2[..N], oy, true);
     circ.set_phase("tlm_coord_rsub_final");

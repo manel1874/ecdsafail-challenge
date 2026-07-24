@@ -1,6 +1,5 @@
 
 use crate::circuit::{BitId, NO_BIT, NO_QUBIT, Op, OperationType, QubitId};
-use crate::point_add::OpSite;
 
 const NEVER: usize = usize::MAX;
 
@@ -491,7 +490,7 @@ fn apply_decisions(ops: &[Op], decisions: &[Decision]) -> Vec<Op> {
     out
 }
 
-fn apply_site_decisions(sites: &[OpSite], decisions: &[Decision]) -> Vec<OpSite> {
+fn apply_site_decisions<T: Copy>(sites: &[T], decisions: &[Decision]) -> Vec<T> {
     let mut out = Vec::with_capacity(sites.len());
     for (i, site) in sites.iter().copied().enumerate() {
         match decisions[i] {
@@ -505,7 +504,7 @@ fn apply_site_decisions(sites: &[OpSite], decisions: &[Decision]) -> Vec<OpSite>
     out
 }
 
-fn filter_sites(sites: &[OpSite], kill: &[bool]) -> Vec<OpSite> {
+fn filter_sites<T: Copy>(sites: &[T], kill: &[bool]) -> Vec<T> {
     sites
         .iter()
         .copied()
@@ -975,6 +974,9 @@ pub(crate) fn ccz_straddle_cancel(ops: Vec<Op>) -> Vec<Op> {
     }
 
     let n_before = ops.len();
+    if cancelled > 0 {
+        crate::point_add::filter_resource_phase_trace(&killed);
+    }
     let kept: Vec<Op> = ops
         .into_iter()
         .enumerate()
@@ -1013,6 +1015,9 @@ pub(crate) fn ccx_final_cancel(ops: Vec<Op>) -> Vec<Op> {
         killed[p.first] = true;
         killed[p.second] = true;
     }
+    if !pairs.is_empty() {
+        crate::point_add::filter_resource_phase_trace(&killed);
+    }
     let kept: Vec<Op> = ops
         .into_iter()
         .enumerate()
@@ -1040,6 +1045,8 @@ pub fn run(ops: Vec<Op>, input_qubits: &[QubitId]) -> Vec<Op> {
     let straddle = std::env::var("TLM_CONSTPROP_STRADDLE").ok().as_deref() == Some("1");
 
     let mut cur_sites = crate::point_add::take_op_site_trace_for_constprop(ops.len());
+    let mut cur_resource_phases =
+        crate::point_add::take_resource_phase_trace_for_transform(ops.len());
     let mut cur = ops;
     let mut iter = 0usize;
     let mut tot_dropped = 0usize;
@@ -1095,6 +1102,9 @@ pub fn run(ops: Vec<Op>, input_qubits: &[QubitId]) -> Vec<Op> {
         if let Some(sites) = cur_sites.as_mut() {
             *sites = apply_site_decisions(sites, &decisions);
         }
+        if let Some(phases) = cur_resource_phases.as_mut() {
+            *phases = apply_site_decisions(phases, &decisions);
+        }
         cur = apply_decisions(&cur, &decisions);
 
         let (nq2, nb2) = dims(&cur);
@@ -1143,6 +1153,9 @@ pub fn run(ops: Vec<Op>, input_qubits: &[QubitId]) -> Vec<Op> {
             }
             if let Some(sites) = cur_sites.as_mut() {
                 *sites = filter_sites(sites, &kill);
+            }
+            if let Some(phases) = cur_resource_phases.as_mut() {
+                *phases = filter_sites(phases, &kill);
             }
             cur = out;
         }
@@ -1193,6 +1206,9 @@ pub fn run(ops: Vec<Op>, input_qubits: &[QubitId]) -> Vec<Op> {
                 if let Some(sites) = cur_sites.as_mut() {
                     *sites = apply_site_decisions(sites, &adec);
                 }
+                if let Some(phases) = cur_resource_phases.as_mut() {
+                    *phases = apply_site_decisions(phases, &adec);
+                }
                 cur = apply_decisions(&cur, &adec);
             }
             let _ = (fold_eq, drop_comp);
@@ -1242,6 +1258,9 @@ pub fn run(ops: Vec<Op>, input_qubits: &[QubitId]) -> Vec<Op> {
 
     if let Some(sites) = cur_sites {
         crate::point_add::set_op_site_trace_from_constprop(sites);
+    }
+    if let Some(phases) = cur_resource_phases {
+        crate::point_add::set_resource_phase_trace_after_transform(phases);
     }
 
     cur

@@ -1,0 +1,366 @@
+\documentclass[varwidth=16cm,border=5pt]{standalone}
+\usepackage{amsmath}
+\usepackage{caption}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{pgfplotstable}
+\usetikzlibrary{backgrounds,calc,positioning}
+\pgfplotsset{compat=1.18}
+\captionsetup[figure]{name=Fig.,labelsep=colon,font=small}
+
+\definecolor{activeblue}{HTML}{1479B8}
+\definecolor{toffoligreen}{HTML}{238B57}
+\definecolor{phasegray}{HTML}{D8E0E6}
+\definecolor{ink}{HTML}{24313A}
+
+\IfFileExists{figures/circuit_profile.csv}
+  {\def\ProfileCsv{figures/circuit_profile.csv}}
+  {\def\ProfileCsv{circuit_profile.csv}}
+\pgfplotstableread[col sep=comma]{\ProfileCsv}\profiledata
+\pgfplotstablegetrowsof{\profiledata}
+\pgfmathtruncatemacro{\ProfileRows}{\pgfplotsretval}
+\newcommand{\StandardPhaseBins}{96}
+\newcommand{\DensePhaseBins}{288}
+\pgfmathtruncatemacro{\ExpectedProfileRows}{3*\StandardPhaseBins+3*\DensePhaseBins}
+\ifnum\ProfileRows=\ExpectedProfileRows\else
+  \PackageError{circuit_resource_profile}
+    {Expected \ExpectedProfileRows\space profile rows, found \ProfileRows}
+    {Regenerate figures/circuit_profile.csv with the documented bin counts.}
+\fi
+
+\newcommand{\NarrowPhaseWidth}{0.88}
+\newcommand{\InversePhaseWidth}{4.984501680}
+\newcommand{\AddThreeXPhaseWidth}{0.045008725}
+\newcommand{\SquarePhaseWidth}{0.755102370}
+\newcommand{\MultiplyPhaseWidth}{4.775387224}
+\newcommand{\PlotLeft}{1.05}
+\newcommand{\ActiveBottom}{8.52}
+\newcommand{\ToffoliBottom}{6.18}
+
+\pgfplotsset{
+  profile active left/.style={
+    axis y line*=left,
+    ytick={512,768,1024,1152},
+    ylabel={active qubits},
+    ylabel style={text=activeblue,font=\small},
+    yticklabel style={text=activeblue,font=\scriptsize},
+    y axis line style={activeblue,line width=0.7pt},
+    y tick style={activeblue},
+  },
+  profile active hidden/.style={
+    axis y line=none,
+    ytick={512,768,1024,1152},
+    yticklabels=\empty,
+    y tick style={draw=none},
+  },
+  profile toffoli right/.style={
+    axis y line*=right,
+    ytick={0,1.041393,2.004321,3.000434,4.000043},
+    yticklabels={$0$,$10$,$10^2$,$10^3$,$10^4$},
+    ylabel={mean Toffoli / run / bin (log)},
+    ylabel style={text=toffoligreen,font=\small},
+    yticklabel style={text=toffoligreen,font=\scriptsize},
+    y axis line style={toffoligreen,line width=0.7pt},
+    y tick style={toffoligreen},
+  },
+  profile toffoli hidden/.style={
+    axis y line=none,
+    ytick={0,1.041393,2.004321,3.000434,4.000043},
+    yticklabels=\empty,
+    y tick style={draw=none},
+  },
+}
+
+\newcommand{\PhasePlot}[8]{%
+  \pgfmathtruncatemacro{\FirstRow}{#1}%
+  \pgfmathsetmacro{\PhaseShift}{#3}%
+
+  % Upper band: active qubits. Only the first facet carries the left y-axis.
+  \begin{axis}[
+    at={({\PhaseShift cm},{\ActiveBottom cm})},
+    anchor=south west,
+    width=#4 cm,
+    height=3.26cm,
+    scale only axis,
+    xmin=#5,
+    xmax=#6,
+    ymin=480,
+    ymax=1180,
+    axis x line=none,
+    #7,
+    xmajorgrids=false,
+    ymajorgrids=false,
+    clip=true,
+    clip mode=individual,
+    unbounded coords=jump,
+  ]
+    \addplot[
+      activeblue,
+      line width=0.88pt,
+      line join=round,
+      no marks,
+    ] table[
+      x expr=\coordindex-\FirstRow,
+      y=active_qubit_count_per_index,
+      row predicate/.code={
+        \ifnum##1<#1\relax\pgfplotstableuserowfalse\fi
+        \ifnum##1>#2\relax\pgfplotstableuserowfalse\fi
+      },
+    ] {\profiledata};
+  \end{axis}
+
+  % Lower band: mean executed Toffolis per complete run in each phase-local
+  % time bin. Only the last facet carries the
+  % independent right y-axis, so the two metric curves cannot intersect.
+  \begin{axis}[
+    at={({\PhaseShift cm},{\ToffoliBottom cm})},
+    anchor=south west,
+    width=#4 cm,
+    height=1.70cm,
+    scale only axis,
+    xmin=#5,
+    xmax=#6,
+    ymin=0,
+    ymax=4.02,
+    axis x line*=bottom,
+    xtick=\empty,
+    x axis line style={ink!75,line width=0.45pt},
+    #8,
+    ymajorgrids=false,
+    clip=true,
+    clip mode=individual,
+    unbounded coords=jump,
+  ]
+    \addplot[
+      toffoligreen,
+      line width=0.78pt,
+      line join=round,
+      no marks,
+    ] table[
+      x expr=\coordindex-\FirstRow,
+      y expr=ln(1+\thisrow{avg_toffoli_gates_per_run_in_bin})/ln(10),
+      row predicate/.code={
+        \ifnum##1<#1\relax\pgfplotstableuserowfalse\fi
+        \ifnum##1>#2\relax\pgfplotstableuserowfalse\fi
+      },
+    ] {\profiledata};
+  \end{axis}
+}
+
+\tikzset{
+  wire/.style={draw=ink,line width=0.62pt},
+  gate/.style={
+    draw=ink,
+    fill=white,
+    rounded corners=1.2pt,
+    line width=0.62pt,
+    minimum width=0.88cm,
+    minimum height=0.62cm,
+    inner sep=2pt,
+    font=\small
+  },
+  twowiregate/.style={
+    gate,
+    minimum width=1.12cm,
+    minimum height=2.06cm,
+    align=center
+  },
+  phaseconnector/.style={
+    draw=gray!55,
+    dash pattern=on 2pt off 2pt,
+    line width=0.45pt,
+    line cap=round
+  }
+}
+
+\newcommand{\PhaseGuidePair}[3]{%
+  \draw[phaseconnector]
+    (#1,5.94)
+    .. controls (#1,5.60)
+       and ($(#3.north west)+(0,0.26)$) ..
+    (#3.north west);
+  \draw[phaseconnector]
+    (#2,5.94)
+    .. controls (#2,5.60)
+       and ($(#3.north east)+(0,0.26)$) ..
+    (#3.north east);
+}
+
+\begin{document}
+\begin{tikzpicture}[x=1cm,y=1cm]
+  % Exact final-operation spans of the four central phases. Their widths are
+  % proportional to these spans, giving all four one common index scale.
+  \pgfmathsetmacro{\xA}{\PlotLeft}
+  \pgfmathsetmacro{\xB}{\xA+\NarrowPhaseWidth}
+  \pgfmathsetmacro{\xC}{\xB+\InversePhaseWidth}
+  \pgfmathsetmacro{\xD}{\xC+\AddThreeXPhaseWidth}
+  \pgfmathsetmacro{\xE}{\xD+\SquarePhaseWidth}
+  \pgfmathsetmacro{\xF}{\xE+\MultiplyPhaseWidth}
+  \pgfmathsetmacro{\PlotRight}{\xF+\NarrowPhaseWidth}
+
+  \node[font=\large\bfseries,text=ink] at
+    ({(\PlotLeft+\PlotRight)/2},13.05)
+    {Circuit resource profile};
+
+  % The edge coordinate phases remain independently compressed; the central
+  % four phases share the common operation-index scale defined above.
+  \begin{scope}[on background layer]
+    \fill[ink!1.8]       (\xA,5.96) rectangle (\xB,12.02);
+    \fill[activeblue!2.5](\xB,5.96) rectangle (\xC,12.02);
+    \fill[ink!1.8]       (\xC,5.96) rectangle (\xD,12.02);
+    \fill[activeblue!2.5](\xD,5.96) rectangle (\xE,12.02);
+    \fill[ink!1.8]       (\xE,5.96) rectangle (\xF,12.02);
+    \fill[activeblue!2.5](\xF,5.96) rectangle (\PlotRight,12.02);
+
+    % Single full-width horizontal guides. These are drawn independently of
+    % the six phase facets so they cannot stop at a phase boundary.
+    \foreach \tickvalue in {512,768,1024,1152} {
+      \pgfmathsetmacro{\guidey}
+        {\ActiveBottom+3.26*(\tickvalue-480)/(1180-480)}
+      \draw[ink!14,line width=0.28pt]
+        (\PlotLeft,\guidey) -- (\PlotRight,\guidey);
+    }
+    \foreach \tickvalue in {1.041393,2.004321,3.000434,4.000043} {
+      \pgfmathsetmacro{\guidey}
+        {\ToffoliBottom+1.70*\tickvalue/4.02}
+      \draw[ink!14,line width=0.28pt]
+        (\PlotLeft,\guidey) -- (\PlotRight,\guidey);
+    }
+  \end{scope}
+
+  \PhasePlot{0}{95}{\xA}{\NarrowPhaseWidth}{0}{95}
+    {profile active left}{profile toffoli hidden}
+  \PhasePlot{96}{383}{\xB}{\InversePhaseWidth}{0}{287}
+    {profile active hidden}{profile toffoli hidden}
+  \PhasePlot{384}{479}{\xC}{\AddThreeXPhaseWidth}{0}{95}
+    {profile active hidden}{profile toffoli hidden}
+  \PhasePlot{480}{767}{\xD}{\SquarePhaseWidth}{0}{287}
+    {profile active hidden}{profile toffoli hidden}
+  \PhasePlot{768}{1055}{\xE}{\MultiplyPhaseWidth}{0}{287}
+    {profile active hidden}{profile toffoli hidden}
+  \PhasePlot{1056}{1151}{\xF}{\NarrowPhaseWidth}{0}{95}
+    {profile active hidden}{profile toffoli right}
+
+  % Shared plot frame, split between metrics to guarantee non-intersection.
+  \draw[ink!55,line width=0.45pt]
+    (\PlotLeft,5.96) rectangle (\PlotRight,12.02);
+  \draw[ink!70,line width=0.35pt]
+    (\PlotLeft,8.20) -- (\PlotRight,8.20);
+  \foreach \xb in {\xB,\xC,\xD,\xE,\xF} {
+    \draw[ink!32,line width=0.38pt] (\xb,5.96) -- (\xb,12.02);
+  }
+
+  % Compact direct legend.
+  \draw[activeblue,line width=0.95pt] (3.55,12.42) -- (4.22,12.42);
+  \node[anchor=west,font=\scriptsize,text=ink] at (4.32,12.42)
+    {active qubits};
+  \draw[toffoligreen,line width=0.85pt] (7.05,12.42) -- (7.72,12.42);
+  \node[anchor=west,font=\scriptsize,text=ink] at (7.82,12.42)
+    {mean executed Toffoli per run};
+
+  % Regular ticks make the shared scale of the central four phases explicit.
+  \foreach \offset/\lab in {
+    2.156584961/$2\mathrm{M}$,
+    4.327511059/$4\mathrm{M}$,
+    6.498437157/$6\mathrm{M}$,
+    8.669363256/$8\mathrm{M}$
+  } {
+    \pgfmathsetmacro{\xtick}{\xB+\offset}
+    \draw[ink!70,line width=0.38pt] (\xtick,5.96) -- (\xtick,5.86);
+    \node[anchor=north,font=\tiny,text=ink!82] at (\xtick,5.84) {\lab};
+  }
+  \node[anchor=north,font=\tiny,text=ink!82] at
+    ({(\xA+\xB)/2},5.84) {$0\!-\!13.2\mathrm{k}$};
+  \node[anchor=north,font=\tiny,text=ink!82] at
+    ({(\xF+\PlotRight)/2},5.84) {$9.74\!-\!9.76\mathrm{M}$};
+  \pgfmathsetmacro{\pA}{(\xA+\xB)/2}
+  \pgfmathsetmacro{\pB}{(\xB+\xC)/2}
+  \pgfmathsetmacro{\pC}{(\xC+\xD)/2}
+  \pgfmathsetmacro{\pD}{(\xD+\xE)/2}
+  \pgfmathsetmacro{\pE}{(\xE+\xF)/2}
+  \pgfmathsetmacro{\pF}{(\xF+\PlotRight)/2}
+  % The add3x phase is only 0.43% of the shared-scale middle span. Offset
+  % these two schematic circuit boxes slightly so their labels remain legible;
+  % the phase-boundary lines above retain the exact scaled positions.
+  \pgfmathsetmacro{\pCDisplay}{\pC-0.50}
+  \pgfmathsetmacro{\pDDisplay}{\pD+0.50}
+
+  % Bottom: the two-register quantum circuit abstraction.
+  \def\WireLeft{0.24}
+  \pgfmathsetmacro{\WireRight}{\PlotRight+0.82}
+  \def\XWire{4.42}
+  \def\YWire{2.98}
+  \draw[wire] (\WireLeft,\XWire) -- (\WireRight,\XWire);
+  \draw[wire] (\WireLeft,\YWire) -- (\WireRight,\YWire);
+
+  \node[anchor=east,font=\large,text=ink] at (\WireLeft,\XWire)
+    {$\lvert x_p\rangle$};
+  \node[anchor=east,font=\large,text=ink] at (\WireLeft,\YWire)
+    {$\lvert y_p\rangle$};
+  \node[anchor=west,font=\large,text=ink] at (\WireRight,\XWire)
+    {$\lvert x_q\rangle$};
+  \node[anchor=west,font=\large,text=ink] at (\WireRight,\YWire)
+    {$\lvert y_q\rangle$};
+
+  % 1: sequential coordinate subtractions on the two registers.
+  \node[gate,minimum width=0.82cm] (subx) at (\pA,\XWire) {$-x_r$};
+  \node[gate,minimum width=0.82cm] (suby) at (\pA,\YWire) {$-y_r$};
+
+  % 2: in-place modular inverse/division, coupling the two register paths.
+  \node[twowiregate] (inverse) at (\pB,{(\XWire+\YWire)/2})
+    {$\mathrm{inv}_p$};
+
+  % 3: classical-coordinate triple add on the x path.
+  \node[gate,minimum width=1.12cm] (add3x) at (\pCDisplay,\XWire)
+    {$+3x_r$};
+
+  % 4 and 5: the square-subtract and forward multiplication blocks.
+  \node[twowiregate] (square) at (\pDDisplay,{(\XWire+\YWire)/2})
+    {$\mathrm{sq}^{-}_p$};
+  \node[twowiregate] (multiply) at (\pE,{(\XWire+\YWire)/2})
+    {$\mathrm{mul}_p$};
+
+  % Filled output markers from the original sketch: lower after inverse,
+  % upper after square, and lower after multiplication.
+  \coordinate (inverseout) at (inverse.east |- 0,\YWire);
+  \coordinate (squareout) at (square.east |- 0,\XWire);
+  \coordinate (multiplyout) at (multiply.east |- 0,\YWire);
+  \foreach \marker in {inverseout,squareout,multiplyout} {
+    \fill[ink]
+      ($(\marker)+(0,-0.075)$) --
+      ($(\marker)+(0, 0.075)$) --
+      ($(\marker)+(0.15,0)$) -- cycle;
+  }
+
+  % 6: restore the canonical output coordinates.
+  \node[gate,minimum width=0.84cm,font=\scriptsize] (rsub) at (\pF,\XWire)
+    {$x_r-\mathord{\cdot}$};
+  \node[gate,minimum width=0.82cm] (subyfinal) at (\pF,\YWire)
+    {$-y_r$};
+
+  % Dashed grey phase guides: each graph interval fans into the circuit block
+  % that implements it, following the hand-drawn mapping in the reference.
+  \begin{scope}[on background layer]
+    \PhaseGuidePair{\xA}{\xB}{subx}
+    \PhaseGuidePair{\xB}{\xC}{inverse}
+    \PhaseGuidePair{\xC}{\xD}{add3x}
+    \PhaseGuidePair{\xD}{\xE}{square}
+    \PhaseGuidePair{\xE}{\xF}{multiply}
+    \PhaseGuidePair{\xF}{\PlotRight}{rsub}
+  \end{scope}
+
+  % Small bundle marks: each horizontal line abstracts a 256-qubit register.
+  \foreach \yy in {\XWire,\YWire} {
+    \draw[ink,line width=0.45pt]
+      ({\WireLeft+0.17},{\yy-0.18}) -- ({\WireLeft+0.31},{\yy+0.18});
+    \node[anchor=south,font=\tiny,text=ink!75] at
+      ({\WireLeft+0.24},{\yy+0.22}) {$256$};
+  }
+
+\end{tikzpicture}
+\captionof{figure}{Active-qubit liveness and mean executed Toffoli gates per
+run across six circuit phases. Toffoli counts include
+$\mathrm{CCX}+\mathrm{CCZ}$ and use a logarithmic axis. The initial and final
+subtraction phases use separate compressed horizontal scales; the four central
+phases share one operation-index scale.}
+\end{document}
